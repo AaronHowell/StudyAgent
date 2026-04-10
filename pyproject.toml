@@ -1,0 +1,22 @@
+[project]
+name = "study-agent-workspace"
+version = "0.1.0"
+description = "Workspace root for the StudyAgent learning project"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+  "apps/api",
+  "packages/application",
+  "packages/documents",
+  "packages/domain",
+  "packages/integrations",
+]
+
+[tool.uv.sources]
+study-agent-api = { workspace = true }
+study-agent-application = { workspace = true }
+study-agent-documents = { workspace = true }
+study-agent-domain = { workspace = true }
+study-agent-integrations = { workspace = true }

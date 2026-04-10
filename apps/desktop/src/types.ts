@@ -1,0 +1,37 @@
+export type AppModuleStatus = "planned" | "in-progress" | "ready";
+
+export interface ModuleCard {
+  name: string;
+  description: string;
+  status: AppModuleStatus;
+}
+
+export interface ScannedDocument {
+  id: string;
+  title: string;
+  file_name: string;
+  path: string;
+  doc_type: string;
+  status: string;
+  ingested: boolean;
+  modified_at: string;
+  content_hash: string;
+}
+
+export interface DocumentImage {
+  id: string;
+  document_id: string;
+  page_number: number;
+  file_name: string;
+  file_path: string;
+  file_url: string;
+  asset_kind: string;
+  asset_label: string;
+  asset_index: number | null;
+  figure_label: string;
+  figure_index: number | null;
+  caption: string;
+  summary: string;
+  asset_type: string;
+  keywords: string[];
+}
