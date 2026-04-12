@@ -42,6 +42,22 @@ class Settings:
     embedding_max_input_tokens: int = 480
     ingest_worker_count: int = 2
     ingest_task_timeout_seconds: int = 900
+    retrieval_debug_log_path: str = "logs/retrieval-debug.jsonl"
+    retrieval_reranker_enabled: bool = False
+    retrieval_reranker_base_url: str = ""
+    retrieval_reranker_api_key: str = ""
+    retrieval_reranker_model: str = ""
+    retrieval_document_recall_k: int = 12
+    retrieval_chunk_recall_k: int = 20
+    retrieval_asset_recall_k: int = 12
+    retrieval_chunk_rerank_neighbor_window: int = 1
+
+    @staticmethod
+    def _bool_env(name: str, default: bool) -> bool:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _int_env(name: str, default: int) -> int:
@@ -81,4 +97,19 @@ class Settings:
             embedding_max_input_tokens=cls._int_env("STUDY_AGENT_EMBEDDING_MAX_INPUT_TOKENS", 480),
             ingest_worker_count=cls._int_env("STUDY_AGENT_INGEST_WORKER_COUNT", 2),
             ingest_task_timeout_seconds=cls._int_env("STUDY_AGENT_INGEST_TASK_TIMEOUT_SECONDS", 900),
+            retrieval_debug_log_path=os.getenv(
+                "STUDY_AGENT_RETRIEVAL_DEBUG_LOG_PATH",
+                "logs/retrieval-debug.jsonl",
+            ),
+            retrieval_reranker_enabled=cls._bool_env("STUDY_AGENT_RETRIEVAL_RERANKER_ENABLED", False),
+            retrieval_reranker_base_url=os.getenv("STUDY_AGENT_RETRIEVAL_RERANKER_BASE_URL", ""),
+            retrieval_reranker_api_key=os.getenv("STUDY_AGENT_RETRIEVAL_RERANKER_API_KEY", ""),
+            retrieval_reranker_model=os.getenv("STUDY_AGENT_RETRIEVAL_RERANKER_MODEL", ""),
+            retrieval_document_recall_k=cls._int_env("STUDY_AGENT_RETRIEVAL_DOCUMENT_RECALL_K", 12),
+            retrieval_chunk_recall_k=cls._int_env("STUDY_AGENT_RETRIEVAL_CHUNK_RECALL_K", 20),
+            retrieval_asset_recall_k=cls._int_env("STUDY_AGENT_RETRIEVAL_ASSET_RECALL_K", 12),
+            retrieval_chunk_rerank_neighbor_window=cls._int_env(
+                "STUDY_AGENT_RETRIEVAL_CHUNK_RERANK_NEIGHBOR_WINDOW",
+                1,
+            ),
         )

@@ -12,7 +12,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import exceptions as qdrant_exceptions
 from qdrant_client.http import models
 
-from study_agent_domain import Chunk, ChunkType, DocumentAsset, DocumentProfile
+from study_agent_domain import Chunk, ChunkType, DocumentAsset, DocumentProfile, ScoredId
 
 
 CHUNK_VECTOR_CONTENT = "content"
@@ -366,12 +366,13 @@ class QdrantChunkVectorStore:
             list[str]: 命中的 chunk id 列表。
         """
 
-        return self.search_chunks(
+        hits = self.search_chunks(
             query_vector=query_vector,
             project_id=project_id,
             vector_name=CHUNK_VECTOR_CONTENT,
             limit=limit,
         )
+        return [hit.entity_id for hit in hits]
 
     def search_chunks(
         self,
@@ -381,7 +382,7 @@ class QdrantChunkVectorStore:
         vector_name: str = CHUNK_VECTOR_CONTENT,
         document_ids: list[str] | None = None,
         limit: int = 5,
-    ) -> list[str]:
+    ) -> list[ScoredId]:
         """Search relevant chunk ids inside one project.
 
         作用:
@@ -420,7 +421,10 @@ class QdrantChunkVectorStore:
             limit=limit,
         )
         return [
-            str(point.payload.get("chunk_id"))
+            ScoredId(
+                entity_id=str(point.payload.get("chunk_id")),
+                score=float(point.score or 0.0),
+            )
             for point in results.points
             if point.payload is not None and point.payload.get("chunk_id") is not None
         ]
@@ -432,7 +436,7 @@ class QdrantChunkVectorStore:
         project_id: str,
         vector_name: str = DOCUMENT_VECTOR_SUMMARY,
         limit: int = 5,
-    ) -> list[str]:
+    ) -> list[ScoredId]:
         """Search relevant document ids at the document-profile level.
 
         作用:
@@ -463,7 +467,10 @@ class QdrantChunkVectorStore:
             limit=limit,
         )
         return [
-            str(point.payload.get("document_id"))
+            ScoredId(
+                entity_id=str(point.payload.get("document_id")),
+                score=float(point.score or 0.0),
+            )
             for point in results.points
             if point.payload is not None and point.payload.get("document_id") is not None
         ]
@@ -476,7 +483,7 @@ class QdrantChunkVectorStore:
         vector_name: str = ASSET_VECTOR_SUMMARY,
         document_ids: list[str] | None = None,
         limit: int = 5,
-    ) -> list[str]:
+    ) -> list[ScoredId]:
         """Search relevant visual asset ids.
 
         作用:
@@ -515,7 +522,10 @@ class QdrantChunkVectorStore:
             limit=limit,
         )
         return [
-            str(point.payload.get("asset_id"))
+            ScoredId(
+                entity_id=str(point.payload.get("asset_id")),
+                score=float(point.score or 0.0),
+            )
             for point in results.points
             if point.payload is not None and point.payload.get("asset_id") is not None
         ]

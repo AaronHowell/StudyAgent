@@ -129,3 +129,81 @@ class BatchIngestDocumentsResponse(BaseModel):
     """Response payload for one batch ingestion request."""
 
     tasks: list[IngestionTaskSummary]
+
+
+class RetrieveEvidenceRequest(BaseModel):
+    """Request payload for one retrieval run."""
+
+    query: str = Field(..., description="Natural-language retrieval query")
+    project_id: str = Field(..., description="Target project identifier")
+    document_limit: int = Field(5, ge=1, le=20, description="Max document hits to return")
+    chunk_limit: int = Field(8, ge=1, le=50, description="Max chunk hits to return")
+    asset_limit: int = Field(6, ge=1, le=50, description="Max asset hits to return")
+
+
+class RetrievalDocumentItem(BaseModel):
+    """One scored document hit returned by the retrieval endpoint."""
+
+    document_id: str
+    score: float
+    title: str
+    file_name: str
+    path: str
+    status: str
+
+
+class RetrievalChunkItem(BaseModel):
+    """One scored chunk hit returned by the retrieval endpoint."""
+
+    chunk_id: str
+    document_id: str
+    score: float
+    chunk_index: int
+    page: int | None = None
+    section: str | None = None
+    text: str
+
+
+class RetrievalAssetItem(BaseModel):
+    """One scored visual-asset hit returned by the retrieval endpoint."""
+
+    asset_id: str
+    document_id: str
+    score: float
+    page_number: int
+    asset_label: str
+    caption: str
+    summary: str
+    asset_type: str
+    file_name: str
+    file_path: str
+
+
+class RetrievalCitationItem(BaseModel):
+    """One citation emitted from retrieved chunk evidence."""
+
+    document_id: str
+    document_title: str
+    chunk_id: str
+    page: int | None = None
+    locator: str = ""
+
+
+class RetrievalEvidenceResponse(BaseModel):
+    """Response payload for one evidence retrieval request."""
+
+    query: str
+    documents: list[RetrievalDocumentItem]
+    text_chunks: list[RetrievalChunkItem]
+    assets: list[RetrievalAssetItem]
+    citations: list[RetrievalCitationItem]
+
+
+class AgentAnswerStreamRequest(BaseModel):
+    """Request payload for one streaming grounded-answer run."""
+
+    question: str = Field(..., description="User question for grounded QA")
+    project_id: str = Field(..., description="Target project identifier")
+    document_limit: int = Field(5, ge=1, le=20)
+    chunk_limit: int = Field(8, ge=1, le=50)
+    asset_limit: int = Field(6, ge=1, le=50)

@@ -1,0 +1,6 @@
+langchain-openai>=0.3.0
+langgraph>=0.4.0
+study-agent-application
+study-agent-documents
+study-agent-domain
+study-agent-integrations

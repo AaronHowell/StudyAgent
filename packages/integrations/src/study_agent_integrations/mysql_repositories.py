@@ -351,6 +351,24 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
                 rows = cursor.fetchall()
         return [document for row in rows if (document := self._row_to_document(row)) is not None]
 
+    def list_by_ids(self, document_ids: list[str]) -> list[Document]:
+        """Load all documents that match one id list."""
+
+        if not document_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(document_ids))
+        sql = f"""
+        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash
+        FROM documents
+        WHERE id IN ({placeholders})
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(document_ids))
+                rows = cursor.fetchall()
+        return [document for row in rows if (document := self._row_to_document(row)) is not None]
+
     def delete(self, document_id: str) -> None:
         """Delete one document row.
 
@@ -498,6 +516,27 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(sql, (document_id,))
+                rows = cursor.fetchall()
+        return [self._row_to_asset(row) for row in rows]
+
+    def list_by_ids(self, asset_ids: list[str]) -> list[DocumentAsset]:
+        """Load all visual assets that match one id list."""
+
+        if not asset_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(asset_ids))
+        sql = f"""
+        SELECT
+            id, document_id, page_number, file_path, file_name, asset_kind, asset_label,
+            asset_index, caption, summary, asset_type, keywords_json,
+            related_chunk_ids_json, media_type, metadata_json
+        FROM document_assets
+        WHERE id IN ({placeholders})
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(asset_ids))
                 rows = cursor.fetchall()
         return [self._row_to_asset(row) for row in rows]
 
@@ -654,6 +693,37 @@ class MySQLChunkRepository(MySQLRepositoryBase):
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(sql, (document_id,))
+                rows = cursor.fetchall()
+        return [
+            Chunk(
+                id=row["id"],
+                project_id=row["project_id"],
+                document_id=row["document_id"],
+                chunk_index=row.get("chunk_index", 0),
+                chunk_type=ChunkType(row["chunk_type"]),
+                text=row["text"],
+                page=row["page"],
+                section=row["section"],
+                metadata=self._load_json(row["metadata_json"], {}),
+            )
+            for row in rows
+        ]
+
+    def list_by_ids(self, chunk_ids: list[str]) -> list[Chunk]:
+        """Load all chunks that match one id list."""
+
+        if not chunk_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(chunk_ids))
+        sql = f"""
+        SELECT id, project_id, document_id, chunk_index, chunk_type, text, page, section, metadata_json
+        FROM chunks
+        WHERE id IN ({placeholders})
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(chunk_ids))
                 rows = cursor.fetchall()
         return [
             Chunk(

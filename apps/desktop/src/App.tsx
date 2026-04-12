@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { StudyAgentChatPanel, buildDocumentFileUrl } from "./StudyAgentChatPanel";
 import type { DocumentImage, ScannedDocument } from "./types";
 
 type WorkspaceMode = "library" | "solo";
@@ -31,7 +32,8 @@ type IngestionTaskSummary = {
   timed_out?: boolean;
 };
 
-const apiBase = "http://127.0.0.1:8000";
+const apiBase =
+  import.meta.env.VITE_STUDY_AGENT_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 function App() {
   const [mode, setMode] = useState<WorkspaceMode>("library");
@@ -45,7 +47,7 @@ function App() {
   const [selectedDocument, setSelectedDocument] = useState<ScannedDocument | null>(null);
   const [documentImages, setDocumentImages] = useState<GalleryImage[]>([]);
   const [notesByDocumentId, setNotesByDocumentId] = useState<Record<string, string>>({});
-  const [aiInput, setAiInput] = useState("");
+  const [aiDockOpen, setAiDockOpen] = useState(true);
   const [contextMenu, setContextMenu] = useState<{
     visible: boolean;
     x: number;
@@ -68,7 +70,7 @@ function App() {
     if (!selectedDocument) {
       return "";
     }
-    return `${apiBase}/documents/file?path=${encodeURIComponent(selectedDocument.path)}`;
+    return buildDocumentFileUrl(selectedDocument.path);
   }, [selectedDocument]);
 
   const selectedNote = selectedDocument ? notesByDocumentId[selectedDocument.id] ?? "" : "";
@@ -473,42 +475,52 @@ function App() {
   }, [orderedTasks, taskFilter]);
 
   return (
-    <main className="workspace" onContextMenu={(event) => event.preventDefault()}>
+    <main
+      className={`workspace ${aiDockOpen && mode === "library" ? "with-ai-dock" : "without-ai-dock"}`}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="workspace-mode-switch">
+        <button
+          className={`mode-button ${mode === "library" ? "active" : ""}`}
+          onClick={() => setMode("library")}
+        >
+          Library Mode
+        </button>
+        <button
+          className={`mode-button ${mode === "solo" ? "active" : ""}`}
+          onClick={() => setMode("solo")}
+        >
+          SOLO Mode
+        </button>
+      </div>
+
+      {mode === "library" && aiDockOpen ? (
       <aside className="floating-ai">
         <div className="floating-header">
-          <strong>Mode Switch</strong>
-          <span className="chip">Unified</span>
+          <strong>StudyAgent AI</strong>
+          <div className="floating-actions">
+            <span className="chip">Grounded QA</span>
+            <button className="icon-button" onClick={() => setAiDockOpen(false)}>
+              Hide
+            </button>
+          </div>
         </div>
-        <div className="mode-toggle">
-          <button
-            className={`mode-button ${mode === "library" ? "active" : ""}`}
-            onClick={() => setMode("library")}
-          >
-            Library
-          </button>
-          <button
-            className={`mode-button ${mode === "solo" ? "active" : ""}`}
-            onClick={() => setMode("solo")}
-          >
-            SOLO
-          </button>
-        </div>
-        <p className="floating-text">
-          {mode === "library"
-            ? "Library mode keeps the PDF desk in focus while the AI sidebar stays available."
-            : "SOLO mode reserves the full panel for future LangGraph agent chat integration."}
-        </p>
-        <textarea
-          className="input textarea"
-          rows={6}
-          value={aiInput}
-          onChange={(event) => setAiInput(event.target.value)}
-          placeholder="Future chat input with the model..."
+        <StudyAgentChatPanel
+          projectId={projectId}
+          title="Reader Copilot"
+          description="Library mode keeps the PDF desk in focus while the LangGraph agent stays available for grounded questions."
+          placeholder="Ask the agent to summarize, compare, or explain the indexed papers..."
+          contextLabel={selectedDocument ? `Focus: ${selectedDocument.title}` : "Scope: whole library"}
+          compact
         />
-        <button className="button primary" disabled>
-          Send Later
-        </button>
       </aside>
+      ) : null}
+
+      {mode === "library" && !aiDockOpen ? (
+        <button className="floating-launcher" onClick={() => setAiDockOpen(true)}>
+          Open AI
+        </button>
+      ) : null}
 
       {mode === "library" ? (
         <>
@@ -712,6 +724,15 @@ function App() {
                     onChange={(event) => updateSelectedNote(event.target.value)}
                     placeholder="Write a short memo here after reading this paper."
                   />
+                  <div className="reader-ai-hint">
+                    <strong>AI Panel</strong>
+                    <p>Use the right-side LangGraph chat dock for grounded questions while reading.</p>
+                    {!aiDockOpen ? (
+                      <button className="button subtle" onClick={() => setAiDockOpen(true)}>
+                        Open AI Dock
+                      </button>
+                    ) : null}
+                  </div>
                 </aside>
               </section>
             </section>
@@ -798,17 +819,12 @@ function App() {
 
           <section className="solo-grid">
             <div className="panel solo-card">
-              <h2>Conversation</h2>
-              <p>
-                The React migration is in place. Next, this panel can be replaced by a LangGraph-compatible agent chat
-                surface without breaking the rest of the desktop workspace.
-              </p>
-              <textarea
-                className="input textarea"
-                rows={12}
-                value={aiInput}
-                onChange={(event) => setAiInput(event.target.value)}
-                placeholder="Future SOLO mode prompt..."
+              <StudyAgentChatPanel
+                projectId={projectId}
+                title="SOLO Conversation"
+                description="Official LangGraph stream and assistant-ui runtime for the main agent workspace."
+                placeholder="Ask a grounded question and stream the answer..."
+                contextLabel={selectedDocument ? `Selected: ${selectedDocument.title}` : "No document pinned"}
               />
             </div>
             <div className="panel solo-card">
@@ -816,6 +832,7 @@ function App() {
               <p>Current selected document: {selectedDocument?.title || "None"}</p>
               <p>Scanned documents: {documents.length}</p>
               <p>Queued ingestion tasks: {Object.keys(taskByPath).length}</p>
+              <p>FastAPI capabilities stay available for scan, ingest, file serving, and retrieval debugging.</p>
             </div>
           </section>
         </section>

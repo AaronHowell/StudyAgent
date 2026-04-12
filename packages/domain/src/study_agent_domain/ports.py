@@ -6,14 +6,18 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 from study_agent_domain.models import (
+    AssetHit,
     Chunk,
+    ChunkHit,
     Citation,
     Document,
     DocumentAsset,
+    DocumentHit,
     EvidencePack,
     MemoryItem,
     PdfPage,
     Project,
+    ScoredId,
     ScanSummary,
     TaskCard,
 )
@@ -39,6 +43,13 @@ class EmbeddingProvider(Protocol):
         """Embed a list of image paths or image identifiers."""
 
 
+class RerankerProvider(Protocol):
+    """Cross-encoder style reranker interface used after vector recall."""
+
+    def rerank(self, query: str, candidates: list[str], top_k: int) -> list[float]:
+        """Return one relevance score per candidate for a query."""
+
+
 class VectorStore(Protocol):
     """Vector persistence and retrieval contract."""
 
@@ -47,6 +58,38 @@ class VectorStore(Protocol):
 
     def search(self, query: str, project_id: str, limit: int = 5) -> list[Chunk]:
         """Search for the most relevant chunks in a project."""
+
+    def search_documents(
+        self,
+        *,
+        query_vector: list[float],
+        project_id: str,
+        vector_name: str = "summary",
+        limit: int = 5,
+    ) -> list[ScoredId]:
+        """Search document-profile hits for one project."""
+
+    def search_chunks(
+        self,
+        *,
+        query_vector: list[float],
+        project_id: str,
+        vector_name: str = "content",
+        document_ids: list[str] | None = None,
+        limit: int = 5,
+    ) -> list[ScoredId]:
+        """Search chunk hits for one project, optionally scoped to candidate documents."""
+
+    def search_assets(
+        self,
+        *,
+        query_vector: list[float],
+        project_id: str,
+        vector_name: str = "summary",
+        document_ids: list[str] | None = None,
+        limit: int = 5,
+    ) -> list[ScoredId]:
+        """Search visual-asset hits for one project, optionally scoped to candidate documents."""
 
     def delete_by_document(self, document_id: str) -> None:
         """Delete indexed data related to one document."""
@@ -83,6 +126,9 @@ class DocumentRepository(Protocol):
     def list_by_project(self, project_id: str) -> list[Document]:
         """Return all documents that belong to one project."""
 
+    def list_by_ids(self, document_ids: list[str]) -> list[Document]:
+        """Return all matching documents for one id list."""
+
     def delete(self, document_id: str) -> None:
         """Delete one document record."""
 
@@ -96,6 +142,9 @@ class DocumentAssetRepository(Protocol):
     def list_by_document(self, document_id: str) -> list[DocumentAsset]:
         """Return all extracted visual assets for one document."""
 
+    def list_by_ids(self, asset_ids: list[str]) -> list[DocumentAsset]:
+        """Return all matching visual assets for one id list."""
+
     def delete_by_document(self, document_id: str) -> None:
         """Delete all visual assets linked to one document."""
 
@@ -108,6 +157,9 @@ class ChunkRepository(Protocol):
 
     def list_by_document(self, document_id: str) -> list[Chunk]:
         """Return all chunks for one document."""
+
+    def list_by_ids(self, chunk_ids: list[str]) -> list[Chunk]:
+        """Return all matching chunks for one id list."""
 
     def delete_by_document(self, document_id: str) -> None:
         """Delete all chunks linked to one document."""

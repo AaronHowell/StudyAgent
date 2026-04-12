@@ -144,4 +144,5 @@ C:\Users\Aaron_Howell\Desktop\postgraduate\PaperStore\STAC.pdf
 - `docs/implementation-status.md`
 - `docs/learning-plan.md`
 - `docs/retrieval-plan.md`
+- `docs/system-manual.md`
 - `DATABASE_SCHEMA.md`

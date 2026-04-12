@@ -201,6 +201,118 @@ class Citation:
 
 
 @dataclass(slots=True)
+class ScoredId:
+    """One vector-search hit that only contains a business id and score."""
+
+    entity_id: str
+    score: float
+
+
+@dataclass(slots=True)
+class DocumentHit:
+    """One scored document-level retrieval result."""
+
+    document: Document
+    score: float
+
+    @property
+    def document_id(self) -> str:
+        return self.document.id
+
+    @property
+    def title(self) -> str:
+        return self.document.title
+
+    @property
+    def file_name(self) -> str:
+        return self.document.file_name
+
+    @property
+    def path(self) -> str:
+        return self.document.path
+
+    @property
+    def status(self) -> str:
+        return self.document.status.value
+
+
+@dataclass(slots=True)
+class ChunkHit:
+    """One scored chunk-level retrieval result."""
+
+    chunk: Chunk
+    score: float
+
+    @property
+    def chunk_id(self) -> str:
+        return self.chunk.id
+
+    @property
+    def document_id(self) -> str:
+        return self.chunk.document_id
+
+    @property
+    def chunk_index(self) -> int:
+        return self.chunk.chunk_index
+
+    @property
+    def page(self) -> int | None:
+        return self.chunk.page
+
+    @property
+    def section(self) -> str | None:
+        return self.chunk.section
+
+    @property
+    def text(self) -> str:
+        return self.chunk.text
+
+
+@dataclass(slots=True)
+class AssetHit:
+    """One scored visual-asset retrieval result."""
+
+    asset: DocumentAsset
+    score: float
+
+    @property
+    def asset_id(self) -> str:
+        return self.asset.id
+
+    @property
+    def document_id(self) -> str:
+        return self.asset.document_id
+
+    @property
+    def page_number(self) -> int:
+        return self.asset.page_number
+
+    @property
+    def asset_label(self) -> str:
+        return self.asset.asset_label
+
+    @property
+    def caption(self) -> str:
+        return self.asset.caption
+
+    @property
+    def summary(self) -> str:
+        return self.asset.summary
+
+    @property
+    def asset_type(self) -> str:
+        return self.asset.asset_type
+
+    @property
+    def file_name(self) -> str:
+        return self.asset.file_name
+
+    @property
+    def file_path(self) -> str:
+        return self.asset.file_path
+
+
+@dataclass(slots=True)
 class TaskCard:
     """A planner-produced task description for the agent workflow."""
 
@@ -215,7 +327,9 @@ class EvidencePack:
     """Retrieved evidence passed from retrieval to generation."""
 
     query: str
-    text_chunks: list[Chunk] = field(default_factory=list)
+    documents: list[DocumentHit] = field(default_factory=list)
+    text_chunks: list[ChunkHit] = field(default_factory=list)
+    assets: list[AssetHit] = field(default_factory=list)
     image_chunks: list[Chunk] = field(default_factory=list)
     web_snippets: list[Chunk] = field(default_factory=list)
     citations: list[Citation] = field(default_factory=list)

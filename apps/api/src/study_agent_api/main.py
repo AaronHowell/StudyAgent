@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
+import json
 from pathlib import Path
 from urllib.parse import quote
 from urllib.parse import urlparse
@@ -11,9 +13,13 @@ from fastapi import FastAPI
 from fastapi import HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 import pymysql
+import uvicorn
 
+from study_agent_application import AnswerQuestionUseCase
 from study_agent_application import IngestDocumentUseCase
+from study_agent_application import RetrieveEvidenceUseCase
 from study_agent_documents import LocalDocumentScanner, PdfParser, TextChunkBuilder
 from study_agent_domain import DocumentStatus, DocumentType
 from study_agent_integrations import (
@@ -21,6 +27,10 @@ from study_agent_integrations import (
     MySQLConnectionConfig,
     MySQLDocumentAssetRepository,
     MySQLDocumentRepository,
+    OpenAICompatibleLLMConfig,
+    OpenAICompatibleLLMProvider,
+    OpenAICompatibleRerankerConfig,
+    OpenAICompatibleRerankerProvider,
     OpenAICompatibleEmbeddingConfig,
     OpenAICompatibleEmbeddingProvider,
     QdrantChunkVectorStore,
@@ -30,6 +40,7 @@ from study_agent_integrations import (
 from study_agent_api.config import Settings
 from study_agent_api.ingestion import IngestionTaskManager
 from study_agent_api.schemas import (
+    AgentAnswerStreamRequest,
     BatchIngestDocumentsRequest,
     BatchIngestDocumentsResponse,
     DocumentImageItem,
@@ -42,20 +53,17 @@ from study_agent_api.schemas import (
     IngestDocumentRequest,
     IngestDocumentResponse,
     IngestionTaskSummary,
+    RetrievalAssetItem,
+    RetrievalChunkItem,
+    RetrievalCitationItem,
+    RetrievalDocumentItem,
+    RetrieveEvidenceRequest,
+    RetrievalEvidenceResponse,
     ScanDocumentsRequest,
     ScanDocumentsResponse,
 )
 
-
 settings = Settings.from_env()
-app = FastAPI(title=settings.app_name)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 document_scanner = LocalDocumentScanner()
 pdf_parser = PdfParser()
@@ -74,6 +82,8 @@ chunk_repository = MySQLChunkRepository(mysql_config)
 document_chunk_builder = TextChunkBuilder()
 embedding_provider = None
 vector_store = None
+reranker_provider = None
+llm_provider = None
 
 embedding_base_url = settings.embedding_base_url or settings.llm_base_url
 embedding_api_key = settings.embedding_api_key or settings.llm_api_key
@@ -84,6 +94,15 @@ if settings.embedding_model and embedding_base_url:
             api_key=embedding_api_key,
             model=settings.embedding_model,
             max_input_tokens=settings.embedding_max_input_tokens,
+        )
+    )
+
+if settings.llm_model and settings.llm_base_url:
+    llm_provider = OpenAICompatibleLLMProvider(
+        OpenAICompatibleLLMConfig(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
         )
     )
 
@@ -99,6 +118,19 @@ if settings.qdrant_url:
         )
     )
 
+if (
+    settings.retrieval_reranker_enabled
+    and settings.retrieval_reranker_base_url
+    and settings.retrieval_reranker_model
+):
+    reranker_provider = OpenAICompatibleRerankerProvider(
+        OpenAICompatibleRerankerConfig(
+            base_url=settings.retrieval_reranker_base_url,
+            api_key=settings.retrieval_reranker_api_key,
+            model=settings.retrieval_reranker_model,
+        )
+    )
+
 ingest_document_use_case = IngestDocumentUseCase(
     document_repository=document_repository,
     asset_repository=asset_repository,
@@ -108,6 +140,27 @@ ingest_document_use_case = IngestDocumentUseCase(
     embedding_provider=embedding_provider,
     vector_store=vector_store,
 )
+retrieve_evidence_use_case = None
+answer_question_use_case = None
+if embedding_provider is not None and vector_store is not None:
+    retrieve_evidence_use_case = RetrieveEvidenceUseCase(
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        document_repository=document_repository,
+        chunk_repository=chunk_repository,
+        asset_repository=asset_repository,
+        reranker_provider=reranker_provider,
+        debug_log_path=Path(settings.retrieval_debug_log_path).expanduser(),
+        document_recall_k=settings.retrieval_document_recall_k,
+        chunk_recall_k=settings.retrieval_chunk_recall_k,
+        asset_recall_k=settings.retrieval_asset_recall_k,
+        chunk_rerank_neighbor_window=settings.retrieval_chunk_rerank_neighbor_window,
+    )
+if retrieve_evidence_use_case is not None and llm_provider is not None:
+    answer_question_use_case = AnswerQuestionUseCase(
+        retrieve_evidence_use_case=retrieve_evidence_use_case,
+        llm_provider=llm_provider,
+    )
 ingestion_task_manager = IngestionTaskManager(
     ingest_document_use_case,
     max_workers=settings.ingest_worker_count,
@@ -117,6 +170,26 @@ ingestion_task_manager = IngestionTaskManager(
 document_repository.ensure_tables()
 asset_repository.ensure_tables()
 chunk_repository.ensure_tables()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Manage API lifecycle resources."""
+
+    try:
+        yield
+    finally:
+        ingestion_task_manager.shutdown(wait=False)
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def is_document_ingested(document_id: str) -> bool:
@@ -170,14 +243,6 @@ def to_ingestion_task_summary(task_id: str) -> IngestionTaskSummary:
         retryable=task.retryable,
         timed_out=task.timed_out,
     )
-
-
-@app.on_event("shutdown")
-def shutdown_task_manager() -> None:
-    """Shutdown the in-process ingestion executor on API exit."""
-
-    ingestion_task_manager.shutdown(wait=False)
-
 
 @app.get("/healthz", response_model=HealthResponse)
 def healthz() -> HealthResponse:
@@ -370,3 +435,118 @@ def get_document_file(path: str = Query(..., description="Absolute path to a loc
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {target_path}")
     return FileResponse(target_path)
+
+
+@app.post("/retrieval/evidence", response_model=RetrievalEvidenceResponse)
+def retrieve_evidence(payload: RetrieveEvidenceRequest) -> RetrievalEvidenceResponse:
+    """Run document, chunk, and asset retrieval and return one evidence pack."""
+
+    if retrieve_evidence_use_case is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Retrieval is unavailable because embedding or vector store is not configured.",
+        )
+
+    evidence_pack = retrieve_evidence_use_case.retrieve(
+        query=payload.query,
+        project_id=payload.project_id,
+        document_limit=payload.document_limit,
+        chunk_limit=payload.chunk_limit,
+        asset_limit=payload.asset_limit,
+    )
+    return RetrievalEvidenceResponse(
+        query=evidence_pack.query,
+        documents=[
+            RetrievalDocumentItem(
+                document_id=hit.document_id,
+                score=hit.score,
+                title=hit.title,
+                file_name=hit.file_name,
+                path=hit.path,
+                status=hit.status,
+            )
+            for hit in evidence_pack.documents
+        ],
+        text_chunks=[
+            RetrievalChunkItem(
+                chunk_id=hit.chunk_id,
+                document_id=hit.document_id,
+                score=hit.score,
+                chunk_index=hit.chunk_index,
+                page=hit.page,
+                section=hit.section,
+                text=hit.text,
+            )
+            for hit in evidence_pack.text_chunks
+        ],
+        assets=[
+            RetrievalAssetItem(
+                asset_id=hit.asset_id,
+                document_id=hit.document_id,
+                score=hit.score,
+                page_number=hit.page_number,
+                asset_label=hit.asset_label,
+                caption=hit.caption,
+                summary=hit.summary,
+                asset_type=hit.asset_type,
+                file_name=hit.file_name,
+                file_path=hit.file_path,
+            )
+            for hit in evidence_pack.assets
+        ],
+        citations=[
+            RetrievalCitationItem(
+                document_id=citation.document_id,
+                document_title=citation.document_title,
+                chunk_id=citation.chunk_id,
+                page=citation.page,
+                locator=citation.locator,
+            )
+            for citation in evidence_pack.citations
+        ],
+    )
+
+
+@app.post("/agent/answer/stream")
+def stream_agent_answer(payload: AgentAnswerStreamRequest) -> StreamingResponse:
+    """Stream one grounded answer as server-sent events."""
+
+    if answer_question_use_case is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent answering is unavailable because retrieval or LLM is not configured.",
+        )
+
+    def event_stream():
+        try:
+            for event in answer_question_use_case.stream_answer(
+                question=payload.question,
+                project_id=payload.project_id,
+                document_limit=payload.document_limit,
+                chunk_limit=payload.chunk_limit,
+                asset_limit=payload.asset_limit,
+            ):
+                yield f"event: {event.event}\n"
+                yield f"data: {json.dumps(event.data, ensure_ascii=False)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            yield "event: error\n"
+            yield f"data: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "study_agent_api.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=False,
+    )
