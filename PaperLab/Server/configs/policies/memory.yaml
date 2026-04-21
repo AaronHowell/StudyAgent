@@ -1,0 +1,4 @@
+supervisor_long_term: true
+worker_long_term: false
+short_term_raw_turns: 3
+short_term_summary_turns: 4

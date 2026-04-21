@@ -1,9 +1,0 @@
-{
-  "dependencies": [
-    "./packages/agents"
-  ],
-  "graphs": {
-    "study_agent": "study_agent_agents.graph:graph"
-  },
-  "env": ".env"
-}

@@ -1,0 +1,3 @@
+workspace_root: .
+allow_write: true
+allow_recursive_delete: false

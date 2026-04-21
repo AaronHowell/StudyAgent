@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paperlab"
+version = "0.1.0"
+description = "PaperLab backend with LangGraph orchestration and document-grounded research workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "ddgs>=9.5.5",
+  "fastapi>=0.115.0",
+  "httpx>=0.28.1",
+  "langchain-openai>=0.3.0",
+  "langgraph>=0.4.0",
+  "langgraph-checkpoint-redis>=0.4.1",
+  "mcp>=1.0.0",
+  "mem0ai>=1.0.11",
+  "pillow>=10.0.0",
+  "pydantic>=2.7.0",
+  "pymupdf>=1.24.0",
+  "pymysql>=1.1.0",
+  "pypdf>=5.0.0",
+  "python-dotenv>=1.0.1",
+  "qdrant-client>=1.10.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]

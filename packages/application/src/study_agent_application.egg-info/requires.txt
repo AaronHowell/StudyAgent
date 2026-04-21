@@ -1,2 +1,0 @@
-study-agent-documents
-study-agent-domain

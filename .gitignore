@@ -1,36 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.venv/
-venv/
+# 默认忽略整个仓库，只保留 PaperLab 作为开源项目根目录。
+/*
 
-# Node
-node_modules/
-dist/
+# 保留根忽略文件本身。
+!/.gitignore
 
-# Tauri / frontend build
-src-tauri/target/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Local env
-.env
-.env.*
-
-# Logs
-*.log
-
-# Local cache
-StudyAgentCache/
-.worktrees/
+# 只放行 PaperLab。
+!/PaperLab/
+!/PaperLab/**

@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: study-agent-documents
-Version: 0.1.0
-Summary: Document discovery, PDF parsing, and chunking helpers for StudyAgent
-Requires-Python: >=3.11
-Requires-Dist: pillow>=10.0.0
-Requires-Dist: pymupdf>=1.24.0
-Requires-Dist: pypdf>=5.0.0
-Requires-Dist: study-agent-domain

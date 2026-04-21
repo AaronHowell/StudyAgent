@@ -1,2 +1,0 @@
-"""StudyAgent API package."""
-

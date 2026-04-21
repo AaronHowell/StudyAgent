@@ -1,0 +1,5 @@
+role: retriever
+long_term_memory: false
+short_term_compression: true
+capabilities:
+  - retrieval
