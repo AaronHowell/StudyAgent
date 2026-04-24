@@ -39,6 +39,7 @@ from integrations import (
     QdrantConnectionConfig,
 )
 
+from api.chat import router as chat_router
 from api.config import Settings
 from api.ingestion import IngestionTaskManager
 from api.schemas import (
@@ -217,6 +218,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(chat_router)
 
 
 def is_document_ingested(document_id: str) -> bool:

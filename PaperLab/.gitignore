@@ -4,3 +4,7 @@ dist/
 __pycache__/
 *.pyc
 .pytest_cache/
+Server/data/
+Server/*.log
+Server/.langgraph_api/
+Server/src/*.egg-info/

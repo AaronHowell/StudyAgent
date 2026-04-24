@@ -5,7 +5,7 @@
 PaperLab is currently split into two top-level applications:
 
 - `Desktop/`: the React + Vite frontend
-- `Server/`: the FastAPI + LangGraph backend
+- `Server/`: the FastAPI backend with LangGraph used as an in-process orchestration library
 
 The backend keeps one supervisor agent and three workers:
 
@@ -19,7 +19,7 @@ Only the supervisor keeps long-term memory. The three workers only receive short
 
 - Frontend main: `Desktop/src/main.tsx`
 - API main: `Server/api/main.py`
-- LangGraph main: `Server/src/orchestration/supervisor.py`
+- Graph main: `Server/src/orchestration/supervisor.py`
 
 ## Current Verified Functions
 
@@ -27,6 +27,7 @@ The current PaperLab tree has been checked for these behaviors:
 
 - backend entrypoints import correctly
 - `GET /healthz` returns `200`
+- FastAPI chat bridge routes load into the API app
 - frontend builds successfully with Vite
 - sandbox task creation works
 - sandbox command execution respects the command whitelist
@@ -56,6 +57,7 @@ Current workspace-task tools:
 - `finish_task`
 
 Repository files remain readable for inspection, but local writes and command execution are restricted to task workspaces.
+`Server/data/` is runtime-generated and is not tracked in Git.
 
 ## Run
 
@@ -65,6 +67,14 @@ Backend:
 cd Server
 uv sync
 uv run uvicorn api.main:app --reload
+```
+
+One-command backend development:
+
+```bash
+cd Server
+uv sync
+uv run python dev.py
 ```
 
 Frontend:

@@ -13,7 +13,7 @@ class LayoutTest(unittest.TestCase):
         self.assertTrue((ROOT / "api/main.py").exists())
         self.assertTrue((ROOT / "src/orchestration/supervisor.py").exists())
         self.assertTrue((ROOT / "pyproject.toml").exists())
-        self.assertTrue((ROOT / "langgraph.json").exists())
+        self.assertTrue((ROOT / "dev.py").exists())
         self.assertTrue((PAPERLAB_ROOT / "Docs/README.md").exists())
 
 

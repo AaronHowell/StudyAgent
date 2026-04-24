@@ -207,3 +207,69 @@ class AgentAnswerStreamRequest(BaseModel):
     document_limit: int = Field(5, ge=1, le=20)
     chunk_limit: int = Field(8, ge=1, le=50)
     asset_limit: int = Field(6, ge=1, le=50)
+
+
+class ChatMessageInput(BaseModel):
+    """Frontend message item accepted by the chat bridge."""
+
+    type: str = Field("human", description="LangChain-compatible message type")
+    content: str = Field(..., description="User-visible message content")
+
+
+class ChatStateUpdate(BaseModel):
+    """State fragment applied before a resume command."""
+
+    messages: list[ChatMessageInput] = Field(default_factory=list)
+
+
+class ChatResumeCommand(BaseModel):
+    """Opaque resume payload passed back into one interrupted graph."""
+
+    action: str | None = None
+
+
+class ChatCommandInput(BaseModel):
+    """Frontend command payload used for guidance injection and resume."""
+
+    update: ChatStateUpdate | None = None
+    resume: dict[str, object] | ChatResumeCommand | None = None
+
+
+class ChatRunRequest(BaseModel):
+    """Request payload for one direct LangGraph-backed chat run."""
+
+    project_id: str = Field(..., description="Target project identifier")
+    thread_id: str = Field(..., description="Persistent graph thread identifier")
+    input: dict[str, object] | None = Field(
+        default=None,
+        description="Initial graph input, typically {messages: [...]}",
+    )
+    command: ChatCommandInput | None = None
+
+
+class ChatInterruptPayload(BaseModel):
+    """Serializable interrupt record returned to the frontend."""
+
+    id: str
+    value: dict[str, object]
+
+
+class ChatMessagePayload(BaseModel):
+    """Serialized LangChain message returned to the desktop UI."""
+
+    id: str | None = None
+    type: str | None = None
+    role: str | None = None
+    content: object
+    additional_kwargs: dict[str, object] = Field(default_factory=dict)
+    response_metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ChatStateResponse(BaseModel):
+    """Thread snapshot returned by the FastAPI chat bridge."""
+
+    thread_id: str
+    project_id: str
+    messages: list[ChatMessagePayload] = Field(default_factory=list)
+    interrupt: ChatInterruptPayload | None = None
+    next_nodes: list[str] = Field(default_factory=list)

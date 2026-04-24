@@ -1,7 +1,5 @@
 """PaperLab main LangGraph orchestration graph."""
 
-from __future__ import annotations
-
 import asyncio
 from typing import Annotated
 from typing import Any
@@ -123,9 +121,9 @@ def _checkpoint_ttl_config(settings: AgentSettings) -> dict[str, Any] | None:
     }
 
 
-def _build_checkpointer() -> Any | None:
-    settings = AgentSettings.from_env()
-    if not settings.checkpoint_redis_enabled:
+def _build_checkpointer(settings: AgentSettings | None = None) -> Any | None:
+    resolved = settings or AgentSettings.from_env()
+    if not resolved.checkpoint_redis_enabled:
         if InMemorySaver is None:
             return None
         return InMemorySaver()
@@ -134,10 +132,10 @@ def _build_checkpointer() -> Any | None:
             "langgraph-checkpoint-redis is required when PAPERLAB_CHECKPOINT_REDIS_ENABLED=true."
         )
     saver = RedisSaver(
-        redis_url=_checkpoint_redis_url(settings),
-        ttl=_checkpoint_ttl_config(settings),
-        checkpoint_prefix=settings.checkpoint_redis_checkpoint_prefix,
-        checkpoint_write_prefix=settings.checkpoint_redis_checkpoint_write_prefix,
+        redis_url=_checkpoint_redis_url(resolved),
+        ttl=_checkpoint_ttl_config(resolved),
+        checkpoint_prefix=resolved.checkpoint_redis_checkpoint_prefix,
+        checkpoint_write_prefix=resolved.checkpoint_redis_checkpoint_write_prefix,
     )
     saver.setup()
     return saver

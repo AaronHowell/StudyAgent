@@ -1,9 +1,0 @@
-{
-  "dependencies": [
-    "./src"
-  ],
-  "graphs": {
-    "paperlab": "orchestration.supervisor:graph"
-  },
-  "env": ".env"
-}

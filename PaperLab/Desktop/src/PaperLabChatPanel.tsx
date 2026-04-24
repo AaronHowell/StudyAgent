@@ -9,7 +9,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import { useState } from "react";
-import { useStream } from "@langchain/react";
+import { usePaperLabStream } from "./usePaperLabStream";
 
 type CitationMeta = {
   document_id: string;
@@ -84,10 +84,6 @@ type PaperLabChatPanelProps = {
 
 const apiBase =
   import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
-const langgraphApiUrl =
-  import.meta.env.VITE_PAPERLAB_LANGGRAPH_API_URL ?? "http://127.0.0.1:2024";
-const langgraphAssistantId =
-  import.meta.env.VITE_PAPERLAB_LANGGRAPH_ASSISTANT_ID ?? "paperlab";
 
 export function PaperLabChatPanel({
   projectId,
@@ -98,11 +94,8 @@ export function PaperLabChatPanel({
   compact = false,
 }: PaperLabChatPanelProps) {
   const [interventionDraft, setInterventionDraft] = useState("");
-  const stream = useStream<PaperLabStreamState, { InterruptType: LoopInterruptValue }>({
-    assistantId: langgraphAssistantId,
-    apiUrl: langgraphApiUrl,
-    reconnectOnMount: true,
-    fetchStateHistory: true,
+  const stream = usePaperLabStream<PaperLabStreamState, LoopInterruptValue>({
+    apiBaseUrl: apiBase,
     initialValues: {
       messages: [],
       evidence_counts: {
@@ -204,16 +197,16 @@ export function PaperLabChatPanel({
 
         <div className="agent-panel-meta">
           <span className="chip">Project: {projectId}</span>
-          {contextLabel ? <span className="chip">{contextLabel}</span> : null}
           <span className="chip">
             Evidence {evidenceCounts?.document_count ?? 0}/{evidenceCounts?.chunk_count ?? 0}/
             {evidenceCounts?.asset_count ?? 0}
           </span>
         </div>
+        {contextLabel ? <div className="agent-context-label">{contextLabel}</div> : null}
 
         {stream.error ? (
           <p className="error-message">
-            {stream.error instanceof Error ? stream.error.message : "LangGraph stream failed."}
+            {stream.error instanceof Error ? stream.error.message : "Chat stream failed."}
           </p>
         ) : null}
 
@@ -290,7 +283,7 @@ export function PaperLabChatPanel({
         <ThreadPrimitive.Root className="agent-thread-root">
           <ThreadPrimitive.If empty>
             <div className="chat-empty">
-              Agent is ready. Start a grounded question and the thread will stream from LangGraph.
+              Agent is ready. Start a grounded question and the thread will stream from FastAPI.
             </div>
           </ThreadPrimitive.If>
 

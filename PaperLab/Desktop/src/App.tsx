@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { PaperLabChatPanel, buildDocumentFileUrl } from "./PaperLabChatPanel";
 import type { DocumentImage, ScannedDocument } from "./types";
 
-type WorkspaceMode = "library" | "solo";
-type CurrentView = "library" | "reader";
+type WorkspaceView = "paper" | "ai";
+type PaperView = "library" | "reader";
 type TaskFilter = "all" | "active" | "failed" | "completed";
 
 type GalleryImage = DocumentImage & {
@@ -36,8 +36,8 @@ const apiBase =
   import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 function App() {
-  const [mode, setMode] = useState<WorkspaceMode>("library");
-  const [currentView, setCurrentView] = useState<CurrentView>("library");
+  const [workspace, setWorkspace] = useState<WorkspaceView>("paper");
+  const [paperView, setPaperView] = useState<PaperView>("library");
   const [rootPath, setRootPath] = useState("C:\\Users\\Aaron_Howell\\Desktop\\postgraduate");
   const [projectId, setProjectId] = useState("frontend-project");
   const [loadingDocuments, setLoadingDocuments] = useState(false);
@@ -47,7 +47,6 @@ function App() {
   const [selectedDocument, setSelectedDocument] = useState<ScannedDocument | null>(null);
   const [documentImages, setDocumentImages] = useState<GalleryImage[]>([]);
   const [notesByDocumentId, setNotesByDocumentId] = useState<Record<string, string>>({});
-  const [aiDockOpen, setAiDockOpen] = useState(true);
   const [contextMenu, setContextMenu] = useState<{
     visible: boolean;
     x: number;
@@ -74,18 +73,59 @@ function App() {
   }, [selectedDocument]);
 
   const selectedNote = selectedDocument ? notesByDocumentId[selectedDocument.id] ?? "" : "";
+  const pendingDocumentCount = useMemo(
+    () =>
+      documents.filter((document) => {
+        const task = getTaskForDocument(document, taskByPath);
+        return !document.ingested && !isTaskActive(task);
+      }).length,
+    [documents, taskByPath],
+  );
+  const activeTaskCount = useMemo(
+    () =>
+      Object.values(taskByPath).filter((task) => task.state === "queued" || task.state === "running")
+        .length,
+    [taskByPath],
+  );
+  const completedDocumentCount = useMemo(
+    () => documents.filter((document) => document.ingested).length,
+    [documents],
+  );
+  const orderedTasks = useMemo(
+    () =>
+      Object.values(taskByPath).sort((left, right) =>
+        right.created_at.localeCompare(left.created_at),
+      ),
+    [taskByPath],
+  );
+  const filteredTasks = useMemo(() => {
+    switch (taskFilter) {
+      case "active":
+        return orderedTasks.filter((task) => task.state === "queued" || task.state === "running");
+      case "failed":
+        return orderedTasks.filter((task) => task.state === "failed");
+      case "completed":
+        return orderedTasks.filter((task) => task.state === "completed");
+      default:
+        return orderedTasks;
+    }
+  }, [orderedTasks, taskFilter]);
 
   useEffect(() => {
-    function handleWindowClick() {
-      setContextMenu((current) => ({ ...current, visible: false, document: null }));
-    }
+    void refreshTaskList();
+  }, []);
 
-    function handleEsc(event: KeyboardEvent) {
+  useEffect(() => {
+    const handleWindowClick = () => {
+      setContextMenu((current) => ({ ...current, visible: false, document: null }));
+    };
+
+    const handleEsc = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setGalleryOpen(false);
         resetGalleryImages();
       }
-    }
+    };
 
     window.addEventListener("click", handleWindowClick);
     window.addEventListener("keydown", handleEsc);
@@ -93,10 +133,6 @@ function App() {
       window.removeEventListener("click", handleWindowClick);
       window.removeEventListener("keydown", handleEsc);
     };
-  }, [documentImages]);
-
-  useEffect(() => {
-    void refreshTaskList();
   }, []);
 
   useEffect(() => {
@@ -111,16 +147,16 @@ function App() {
 
   useEffect(() => {
     let timer: number | undefined;
-    const activeTasks = Object.values(taskByPath).filter(
+    const hasActiveTasks = Object.values(taskByPath).some(
       (task) => task.state === "queued" || task.state === "running",
     );
 
-    if (activeTasks.length === 0) {
+    if (!hasActiveTasks) {
       return;
     }
 
-    timer = window.setInterval(async () => {
-      await refreshTaskList();
+    timer = window.setInterval(() => {
+      void refreshTaskList();
     }, 1500);
 
     return () => {
@@ -152,8 +188,8 @@ function App() {
       const payload = (await response.json()) as { documents: ScannedDocument[] };
       setDocuments(payload.documents);
       setSelectedDocument(payload.documents[0] ?? null);
+      setPaperView("library");
       resetGalleryImages();
-      setCurrentView("library");
       await refreshTaskList();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Scan failed");
@@ -208,8 +244,7 @@ function App() {
     const candidatePaths = documents
       .filter((document) => {
         const task = taskByPath[document.path];
-        const hasActiveTask = task && (task.state === "queued" || task.state === "running");
-        return !document.ingested && !hasActiveTask;
+        return !document.ingested && !isTaskActive(task);
       })
       .map((document) => document.path);
 
@@ -250,14 +285,20 @@ function App() {
     }
   }
 
-  function openDocument(document: ScannedDocument) {
+  function focusDocument(document: ScannedDocument) {
     setSelectedDocument(document);
-    setCurrentView("reader");
+    setWorkspace("paper");
+  }
+
+  function openReader(document: ScannedDocument) {
+    setSelectedDocument(document);
+    setPaperView("reader");
+    setWorkspace("paper");
     closeContextMenu();
   }
 
   function backToLibrary() {
-    setCurrentView("library");
+    setPaperView("library");
   }
 
   async function loadDocumentImages(document: ScannedDocument) {
@@ -292,23 +333,18 @@ function App() {
     }
   }
 
-  function showPdfOnly(document: ScannedDocument) {
-    setSelectedDocument(document);
-    setCurrentView("reader");
-    closeContextMenu();
-  }
-
   function updateSelectedNote(value: string) {
     if (!selectedDocument) {
       return;
     }
+
     setNotesByDocumentId((current) => ({
       ...current,
       [selectedDocument.id]: value,
     }));
   }
 
-  function openContextMenu(event: React.MouseEvent, document: ScannedDocument) {
+  function openContextMenu(event: MouseEvent, document: ScannedDocument) {
     event.preventDefault();
     event.stopPropagation();
     setSelectedDocument(document);
@@ -332,25 +368,6 @@ function App() {
   function closeGallery() {
     setGalleryOpen(false);
     resetGalleryImages();
-  }
-
-  async function handleViewImages() {
-    if (contextMenu.document) {
-      await loadDocumentImages(contextMenu.document);
-    }
-  }
-
-  function handleOpenOriginal() {
-    if (contextMenu.document) {
-      showPdfOnly(contextMenu.document);
-    }
-  }
-
-  async function handleIngestDocument() {
-    if (contextMenu.document) {
-      await queueIngestion(contextMenu.document);
-      closeContextMenu();
-    }
   }
 
   function resetGalleryImages() {
@@ -388,457 +405,719 @@ function App() {
   }
 
   async function refreshTaskList() {
-    const response = await fetch(`${apiBase}/documents/ingest`);
-    if (!response.ok) {
-      return;
-    }
-
-    const tasks = (await response.json()) as IngestionTaskSummary[];
-    setTaskByPath(() => {
-      const next: Record<string, IngestionTaskSummary> = {};
-      for (const task of tasks) {
-        next[task.path] = task;
+    try {
+      const response = await fetch(`${apiBase}/documents/ingest`);
+      if (!response.ok) {
+        return;
       }
-      return next;
-    });
 
-    setDocuments((current) =>
-      current.map((document) => {
-        const task = tasks.find((item) => item.path === document.path);
-        if (!task) {
+      const tasks = (await response.json()) as IngestionTaskSummary[];
+      setTaskByPath(() => {
+        const next: Record<string, IngestionTaskSummary> = {};
+        for (const task of tasks) {
+          next[task.path] = task;
+        }
+        return next;
+      });
+
+      setDocuments((current) =>
+        current.map((document) => {
+          const task = tasks.find((item) => item.path === document.path);
+          if (!task) {
+            return document;
+          }
+          if (task.state === "completed") {
+            return { ...document, ingested: true };
+          }
           return document;
-        }
-        if (task.state === "completed") {
-          return { ...document, ingested: true };
-        }
-        return document;
-      }),
-    );
-  }
-
-  function renderTaskState(document: ScannedDocument) {
-    const task = taskByPath[document.path];
-    if (!task) {
-      return document.ingested ? "Indexed" : "Pending";
+        }),
+      );
+    } catch {
+      // Keep the current state if the task refresh fails.
     }
-    return task.state;
   }
 
-  function getTaskForDocument(document: ScannedDocument) {
-    return taskByPath[document.path];
-  }
-
-  function isTaskActive(task?: IngestionTaskSummary | null) {
-    return task?.state === "queued" || task?.state === "running";
-  }
-
-  function getDocumentActionLabel(document: ScannedDocument) {
-    const task = getTaskForDocument(document);
-    if (document.ingested) {
-      return "Re-ingest Document";
-    }
-    if (task?.state === "failed") {
-      return "Retry Ingest";
-    }
-    if (isTaskActive(task)) {
-      return "Ingesting...";
-    }
-    return "Ingest Document";
-  }
-
-  function getPendingDocumentCount() {
-    return documents.filter((document) => {
-      const task = getTaskForDocument(document);
-      return !document.ingested && !isTaskActive(task);
-    }).length;
-  }
-
-  const orderedTasks = useMemo(
-    () =>
-      Object.values(taskByPath).sort((left, right) =>
-        right.created_at.localeCompare(left.created_at),
-      ),
-    [taskByPath],
-  );
-
-  const filteredTasks = useMemo(() => {
-    switch (taskFilter) {
-      case "active":
-        return orderedTasks.filter((task) => task.state === "queued" || task.state === "running");
-      case "failed":
-        return orderedTasks.filter((task) => task.state === "failed");
-      case "completed":
-        return orderedTasks.filter((task) => task.state === "completed");
-      default:
-        return orderedTasks;
-    }
-  }, [orderedTasks, taskFilter]);
+  const currentTask = selectedDocument ? taskByPath[selectedDocument.path] : undefined;
+  const selectedDocumentState = selectedDocument
+    ? renderTaskState(selectedDocument, taskByPath)
+    : "No paper selected";
 
   return (
-    <main
-      className={`workspace ${aiDockOpen && mode === "library" ? "with-ai-dock" : "without-ai-dock"}`}
-      onContextMenu={(event) => event.preventDefault()}
-    >
-      <div className="workspace-mode-switch">
-        <button
-          className={`mode-button ${mode === "library" ? "active" : ""}`}
-          onClick={() => setMode("library")}
-        >
-          Library Mode
-        </button>
-        <button
-          className={`mode-button ${mode === "solo" ? "active" : ""}`}
-          onClick={() => setMode("solo")}
-        >
-          SOLO Mode
-        </button>
-      </div>
+    <main className="app-shell" onContextMenu={(event) => event.preventDefault()}>
+      <header className="app-shell-header">
+        <div className="app-brand">
+          <p className="app-kicker">PaperLab Desktop</p>
+          <h1>Research Control Center</h1>
+          <p className="app-subtitle">
+            Read papers, inspect figures, and direct the same AI assistant from either a paper-first
+            desk or a pure research console.
+          </p>
+        </div>
 
-      {mode === "library" && aiDockOpen ? (
-      <aside className="floating-ai">
-        <div className="floating-header">
-          <strong>PaperLab AI</strong>
-          <div className="floating-actions">
-            <span className="chip">Grounded QA</span>
-            <button className="icon-button" onClick={() => setAiDockOpen(false)}>
-              Hide
+        <div className="app-shell-meta">
+          <div className="project-chip-group">
+            <span className="chip">Project: {projectId}</span>
+            <span className="chip">Papers: {documents.length}</span>
+            <span className="chip">Active Tasks: {activeTaskCount}</span>
+          </div>
+          <div className="workspace-tabs" role="tablist" aria-label="Workspaces">
+            <button
+              className={`workspace-tab ${workspace === "paper" ? "active" : ""}`}
+              role="tab"
+              id="paper-workspace-tab"
+              aria-selected={workspace === "paper"}
+              aria-controls="paper-workspace-panel"
+              onClick={() => setWorkspace("paper")}
+            >
+              Paper Workspace
+            </button>
+            <button
+              className={`workspace-tab ${workspace === "ai" ? "active" : ""}`}
+              role="tab"
+              id="ai-workspace-tab"
+              aria-selected={workspace === "ai"}
+              aria-controls="ai-workspace-panel"
+              onClick={() => setWorkspace("ai")}
+            >
+              AI Workspace
             </button>
           </div>
         </div>
-        <PaperLabChatPanel
-          projectId={projectId}
-          title="Reader Copilot"
-          description="Library mode keeps the PDF desk in focus while the LangGraph agent stays available for grounded questions."
-          placeholder="Ask the agent to summarize, compare, or explain the indexed papers..."
-          contextLabel={selectedDocument ? `Focus: ${selectedDocument.title}` : "Scope: whole library"}
-          compact
-        />
-      </aside>
-      ) : null}
+      </header>
 
-      {mode === "library" && !aiDockOpen ? (
-        <button className="floating-launcher" onClick={() => setAiDockOpen(true)}>
-          Open AI
-        </button>
-      ) : null}
+      {errorMessage ? <p className="error-message app-error-banner">{errorMessage}</p> : null}
 
-      {mode === "library" ? (
-        <>
-          {currentView === "library" ? (
-            <section className="shell">
-              <header className="hero">
+      {workspace === "paper" ? (
+        <section
+          className="paper-workspace"
+          id="paper-workspace-panel"
+          role="tabpanel"
+          aria-labelledby="paper-workspace-tab"
+        >
+          <aside className="workspace-panel desk-sidebar">
+            <section className="panel-section control-panel">
+              <div className="section-heading">
                 <div>
-                  <p className="eyebrow">PaperLab Workspace</p>
-                  <h1>Research Library</h1>
-                  <p className="subtext">Manage your local PDF collection, queue ingestion, and jump into reading.</p>
+                  <p className="section-kicker">Workspace Setup</p>
+                  <h2>Library Control</h2>
                 </div>
-                <div className="hero-grid">
-                  <label className="field">
-                    <span>Project Folder</span>
-                    <input
-                      className="input"
-                      value={rootPath}
-                      onChange={(event) => setRootPath(event.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Project Id</span>
-                    <input
-                      className="input"
-                      value={projectId}
-                      onChange={(event) => setProjectId(event.target.value)}
-                    />
-                  </label>
-                  <button className="button primary" onClick={scanDocuments} disabled={loadingDocuments}>
-                    {loadingDocuments ? "Scanning..." : "Scan PDFs"}
-                  </button>
-                  <button
-                    className="button subtle"
-                    onClick={batchIngestPendingDocuments}
-                    disabled={batchIngesting || getPendingDocumentCount() === 0}
-                  >
-                    {batchIngesting
-                      ? "Queueing Batch..."
-                      : `Batch Ingest Pending (${getPendingDocumentCount()})`}
-                  </button>
-                </div>
-              </header>
+                <span className="chip">Default Desk</span>
+              </div>
 
-              <section className="library-grid">
-                <section className="panel table-panel">
-                {errorMessage ? <p className="error-message">{errorMessage}</p> : null}
-                <div className="table-wrap">
-                  <table className="document-table">
-                    <thead>
-                      <tr>
-                        <th>Title</th>
-                        <th>State</th>
-                        <th>Memo</th>
-                        <th>File Name</th>
-                        <th>Modified</th>
-                        <th>Path</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {documents.map((document) => (
-                        <tr
-                          key={document.id}
-                          className={selectedDocument?.id === document.id ? "selected" : ""}
-                          onClick={() => setSelectedDocument(document)}
-                          onDoubleClick={() => openDocument(document)}
-                          onContextMenu={(event) => openContextMenu(event, document)}
-                        >
-                          <td>{document.title}</td>
-                          <td>
-                            <span className={`status-badge state-${renderTaskState(document).toLowerCase()}`}>
-                              {renderTaskState(document)}
-                            </span>
-                          </td>
-                          <td>{notesByDocumentId[document.id] || "No memo yet."}</td>
-                          <td>{document.file_name}</td>
-                          <td>{new Date(document.modified_at).toLocaleString()}</td>
-                          <td className="path-cell">{document.path}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <p className="hint">Double click opens the reader. Right click opens document actions.</p>
-                </section>
+              <label className="field">
+                <span>Project Folder</span>
+                <input
+                  className="input"
+                  value={rootPath}
+                  onChange={(event) => setRootPath(event.target.value)}
+                />
+              </label>
 
-                <aside className="panel task-panel">
-                  <div className="section-head">
-                    <h2>Ingestion Tasks</h2>
-                    <span className="chip">{filteredTasks.length}</span>
-                  </div>
-                  <div className="task-filter-row">
-                    <button
-                      className={`task-filter-button ${taskFilter === "all" ? "active" : ""}`}
-                      onClick={() => setTaskFilter("all")}
-                    >
-                      All
-                    </button>
-                    <button
-                      className={`task-filter-button ${taskFilter === "active" ? "active" : ""}`}
-                      onClick={() => setTaskFilter("active")}
-                    >
-                      Active
-                    </button>
-                    <button
-                      className={`task-filter-button ${taskFilter === "failed" ? "active" : ""}`}
-                      onClick={() => setTaskFilter("failed")}
-                    >
-                      Failed
-                    </button>
-                    <button
-                      className={`task-filter-button ${taskFilter === "completed" ? "active" : ""}`}
-                      onClick={() => setTaskFilter("completed")}
-                    >
-                      Completed
-                    </button>
-                  </div>
-                  {filteredTasks.length === 0 ? (
-                    <p className="task-empty">No ingestion tasks yet.</p>
-                  ) : (
-                    <div className="task-list">
-                      {filteredTasks.map((task) => (
-                        <article className="task-card" key={task.task_id}>
-                          <div className="task-head">
-                            <strong>{task.result?.status || task.state}</strong>
-                            <span className={`status-badge state-${task.state.toLowerCase()}`}>{task.state}</span>
-                          </div>
-                          <p className="task-path">{task.path}</p>
-                          <p className="task-meta">
-                            {task.result?.message || task.error_message || "Waiting for execution."}
-                          </p>
-                          {task.error_code ? (
-                            <small className="task-meta">
-                              {task.error_code}
-                              {task.retryable ? " · retryable" : ""}
-                              {task.timed_out ? " · timed out" : ""}
-                            </small>
-                          ) : null}
-                          {task.error_type ? <small className="task-meta">Type: {task.error_type}</small> : null}
-                          {task.started_at ? (
-                            <small className="task-meta">
-                              Started: {new Date(task.started_at).toLocaleString()}
-                            </small>
-                          ) : null}
-                          {task.finished_at ? (
-                            <small className="task-meta">
-                              Finished: {new Date(task.finished_at).toLocaleString()}
-                            </small>
-                          ) : null}
-                          <small className="task-meta">
-                            Created: {new Date(task.created_at).toLocaleString()}
-                          </small>
-                          {task.state === "failed" && task.retryable ? (
-                            <button className="button subtle task-retry-button" onClick={() => void retryTask(task)}>
-                              Retry Task
-                            </button>
-                          ) : null}
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                </aside>
-              </section>
+              <label className="field">
+                <span>Project Id</span>
+                <input
+                  className="input"
+                  value={projectId}
+                  onChange={(event) => setProjectId(event.target.value)}
+                />
+              </label>
+
+              <div className="button-row">
+                <button className="button primary" onClick={scanDocuments} disabled={loadingDocuments}>
+                  {loadingDocuments ? "Scanning..." : "Scan Papers"}
+                </button>
+                <button
+                  className="button subtle"
+                  onClick={batchIngestPendingDocuments}
+                  disabled={batchIngesting || pendingDocumentCount === 0}
+                >
+                  {batchIngesting ? "Queueing..." : `Batch Ingest (${pendingDocumentCount})`}
+                </button>
+              </div>
             </section>
-          ) : (
-            <section className="reader-page">
-              <header className="hero reader-hero">
-                <div>
-                  <p className="eyebrow">PaperLab Reader</p>
-                  <h1>{selectedDocument?.title || "Reader"}</h1>
-                  <p className="subtext">{selectedDocument?.path}</p>
-                </div>
-                <div className="reader-actions">
-                  <button className="button subtle" onClick={backToLibrary}>
-                    Back To Library
-                  </button>
-                  {selectedDocument ? (
-                    <button className="button primary" onClick={() => loadDocumentImages(selectedDocument)}>
-                      Open Figure Gallery
-                    </button>
-                  ) : null}
-                </div>
-              </header>
 
-              <section className="reader-shell">
-                <div className="panel pdf-panel">
+            <section className="panel-section summary-grid">
+              <article className="summary-card">
+                <span className="summary-label">Indexed</span>
+                <strong>{completedDocumentCount}</strong>
+                <p>papers ready for grounded retrieval</p>
+              </article>
+              <article className="summary-card">
+                <span className="summary-label">Pending</span>
+                <strong>{pendingDocumentCount}</strong>
+                <p>papers still waiting for ingestion</p>
+              </article>
+              <article className="summary-card">
+                <span className="summary-label">Running</span>
+                <strong>{activeTaskCount}</strong>
+                <p>jobs currently executing</p>
+              </article>
+            </section>
+
+            <section className="panel-section document-list-section">
+              <div className="section-heading">
+                <div>
+                  <p className="section-kicker">Library</p>
+                  <h2>Paper Queue</h2>
+                </div>
+                <span className="chip">{documents.length}</span>
+              </div>
+
+              {documents.length === 0 ? (
+                <div className="empty-state-card">
+                  <strong>No papers loaded</strong>
+                  <p>Scan your project folder to populate the reading desk.</p>
+                </div>
+              ) : (
+                <div className="document-list">
+                  {documents.map((document) => {
+                    const task = getTaskForDocument(document, taskByPath);
+                    const state = renderTaskState(document, taskByPath);
+                    const active = selectedDocument?.id === document.id;
+                    return (
+                      <article
+                        key={document.id}
+                        className={`document-row ${active ? "is-selected" : ""}`}
+                        onClick={() => focusDocument(document)}
+                        onDoubleClick={() => openReader(document)}
+                        onContextMenu={(event) => openContextMenu(event, document)}
+                      >
+                        <div className="document-row-header">
+                          <div>
+                            <strong>{document.title}</strong>
+                            <p>{document.file_name}</p>
+                          </div>
+                          <StatusBadge state={state} />
+                        </div>
+                        <p className="document-meta">{formatDate(document.modified_at)}</p>
+                        <p className="document-path">{document.path}</p>
+                        <div className="document-inline-actions">
+                          <button
+                            className="mini-action"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openReader(document);
+                            }}
+                          >
+                            Open
+                          </button>
+                          <button
+                            className="mini-action"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void loadDocumentImages(document);
+                            }}
+                          >
+                            Gallery
+                          </button>
+                          <button
+                            className="mini-action"
+                            disabled={isTaskActive(task) || ingestingDocumentId === document.id}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void queueIngestion(document);
+                            }}
+                          >
+                            {document.ingested ? "Re-ingest" : task?.state === "failed" ? "Retry" : "Ingest"}
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </aside>
+
+          <section className="workspace-panel desk-main">
+            {paperView === "reader" && selectedDocument ? (
+              <section className="reader-panel">
+                <div className="workspace-toolbar">
+                  <div>
+                    <p className="section-kicker">Reader</p>
+                    <h2>{selectedDocument.title}</h2>
+                    <p className="toolbar-copy">{selectedDocument.path}</p>
+                  </div>
+                  <div className="button-row">
+                    <button className="button subtle" onClick={backToLibrary}>
+                      Back to Library
+                    </button>
+                    <button
+                      className="button subtle"
+                      onClick={() => void loadDocumentImages(selectedDocument)}
+                    >
+                      Figure Gallery
+                    </button>
+                  </div>
+                </div>
+
+                <div className="reader-frame">
                   {selectedPdfUrl ? (
                     <iframe src={selectedPdfUrl} className="pdf-viewer" title="PDF Viewer" />
                   ) : (
-                    <div className="empty-state">No document selected.</div>
+                    <div className="empty-state-card">
+                      <strong>No active reader</strong>
+                      <p>Select a paper from the library to open the reader.</p>
+                    </div>
                   )}
                 </div>
-                <aside className="panel note-panel">
-                  <div className="section-head">
-                    <h2>Paper Memo</h2>
-                    <span className="chip">Quick Recall</span>
-                  </div>
-                  <textarea
-                    className="input textarea note-textarea"
-                    rows={10}
-                    value={selectedNote}
-                    onChange={(event) => updateSelectedNote(event.target.value)}
-                    placeholder="Write a short memo here after reading this paper."
-                  />
-                  <div className="reader-ai-hint">
-                    <strong>AI Panel</strong>
-                    <p>Use the right-side LangGraph chat dock for grounded questions while reading.</p>
-                    {!aiDockOpen ? (
-                      <button className="button subtle" onClick={() => setAiDockOpen(true)}>
-                        Open AI Dock
-                      </button>
-                    ) : null}
-                  </div>
-                </aside>
               </section>
-            </section>
-          )}
-
-          {contextMenu.visible && contextMenu.document ? (
-            <div
-              className="context-menu"
-              style={{ left: contextMenu.x, top: contextMenu.y }}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <button className="context-menu-item" onClick={handleOpenOriginal}>
-                Open Original PDF
-              </button>
-              <button className="context-menu-item" onClick={handleViewImages}>
-                Open Figure Gallery
-              </button>
-              <button
-                className="context-menu-item"
-                onClick={handleIngestDocument}
-                disabled={
-                  ingestingDocumentId === contextMenu.document.id ||
-                  isTaskActive(getTaskForDocument(contextMenu.document))
-                }
-              >
-                {ingestingDocumentId === contextMenu.document.id
-                  ? "Queueing..."
-                  : getDocumentActionLabel(contextMenu.document)}
-              </button>
-            </div>
-          ) : null}
-
-          {galleryOpen ? (
-            <div className="modal-backdrop" onClick={closeGallery}>
-              <section className="modal-panel" onClick={(event) => event.stopPropagation()}>
-                <header className="modal-header">
+            ) : (
+              <section className="desk-overview">
+                <div className="workspace-toolbar">
                   <div>
-                    <p className="eyebrow">PaperLab Gallery</p>
-                    <h2>{galleryDocument?.title || "Figure Gallery"}</h2>
-                    <p className="subtext">{galleryDocument?.path}</p>
+                    <p className="section-kicker">Paper Workspace</p>
+                    <h2>Research Desk</h2>
+                    <p className="toolbar-copy">
+                      Keep the paper list, reading surface, and grounded assistant aligned around the
+                      current document.
+                    </p>
                   </div>
-                  <button className="button subtle" onClick={closeGallery}>
-                    Close
-                  </button>
-                </header>
+                  <div className="button-row">
+                    <button
+                      className="button primary"
+                      onClick={() => selectedDocument && openReader(selectedDocument)}
+                      disabled={!selectedDocument}
+                    >
+                      Open Reader
+                    </button>
+                    <button
+                      className="button subtle"
+                      onClick={() => selectedDocument && void loadDocumentImages(selectedDocument)}
+                      disabled={!selectedDocument}
+                    >
+                      Figure Gallery
+                    </button>
+                    <button
+                      className="button subtle"
+                      onClick={() => selectedDocument && void queueIngestion(selectedDocument)}
+                      disabled={!selectedDocument || isTaskActive(currentTask) || ingestingDocumentId === selectedDocument?.id}
+                    >
+                      {selectedDocument?.ingested
+                        ? "Re-ingest Paper"
+                        : currentTask?.state === "failed"
+                          ? "Retry Ingest"
+                          : "Ingest Paper"}
+                    </button>
+                  </div>
+                </div>
 
-                {loadingImages ? <p className="loading-copy">Loading extracted visual assets...</p> : null}
-                {!loadingImages && documentImages.length === 0 ? (
-                  <div className="empty-gallery">No body figures were extracted from this paper.</div>
-                ) : null}
-
-                <div className="gallery-grid">
-                  {documentImages.map((image) => (
-                    <article className="gallery-card" key={image.id}>
-                      {image.preview_url ? (
-                        <img className="gallery-image" src={image.preview_url} alt={image.asset_label || image.file_name} loading="lazy" />
-                      ) : (
-                        <div className="gallery-image empty-image">Preview unavailable</div>
-                      )}
-                      <div className="gallery-copy">
-                        <strong>{image.figure_label || image.asset_label || `Page ${image.page_number}`}</strong>
-                        <p>{image.summary || image.caption || "No extracted summary."}</p>
-                        <small>{image.caption || `${image.asset_type} · page ${image.page_number}`}</small>
+                {selectedDocument ? (
+                  <div className="selected-paper-card">
+                    <div className="selected-paper-header">
+                      <div>
+                        <p className="section-kicker">Selected Paper</p>
+                        <h3>{selectedDocument.title}</h3>
                       </div>
-                    </article>
+                      <StatusBadge state={selectedDocumentState} />
+                    </div>
+                    <div className="info-grid">
+                      <article className="info-card">
+                        <span className="info-label">Source File</span>
+                        <strong>{selectedDocument.file_name}</strong>
+                        <p>{selectedDocument.path}</p>
+                      </article>
+                      <article className="info-card">
+                        <span className="info-label">Last Modified</span>
+                        <strong>{formatDate(selectedDocument.modified_at)}</strong>
+                        <p>{selectedDocument.ingested ? "Indexed for retrieval" : "Waiting to be indexed"}</p>
+                      </article>
+                      <article className="info-card">
+                        <span className="info-label">Next Step</span>
+                        <strong>{paperView === "reader" ? "Continue reading" : "Open and annotate"}</strong>
+                        <p>Use the actions above to read, inspect figures, or queue ingestion.</p>
+                      </article>
+                    </div>
+                    <div className="desk-preview-card">
+                      <strong>Why this layout</strong>
+                      <p>
+                        Visible actions replace the old right-click-only flow, while the current paper
+                        stays pinned as the center of the workspace.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="empty-state-card">
+                    <strong>No paper selected</strong>
+                    <p>Scan papers and select one from the left column to start reading or asking the assistant.</p>
+                  </div>
+                )}
+              </section>
+            )}
+          </section>
+
+          <aside className="workspace-panel desk-context">
+            <div className="desk-context-stack">
+              <section className="panel-section context-card">
+                <div className="section-heading">
+                  <div>
+                    <p className="section-kicker">Current Scope</p>
+                    <h2>Paper Context</h2>
+                  </div>
+                  <StatusBadge state={selectedDocumentState} />
+                </div>
+                {selectedDocument ? (
+                  <>
+                    <p className="context-title">{selectedDocument.title}</p>
+                    <p className="context-copy">{selectedDocument.path}</p>
+                    <p className="context-copy">
+                      AI replies in this workspace should be understood as grounded in the selected paper
+                      when available.
+                    </p>
+                  </>
+                ) : (
+                  <p className="context-copy">
+                    Select a paper to pin reading context for notes, citations, and grounded assistant answers.
+                  </p>
+                )}
+              </section>
+
+              <section className="panel-section memo-panel">
+                <div className="section-heading">
+                  <div>
+                    <p className="section-kicker">Reading Notes</p>
+                    <h2>Paper Memo</h2>
+                  </div>
+                  <span className="chip">Quick Recall</span>
+                </div>
+                <textarea
+                  className="input textarea note-textarea"
+                  rows={10}
+                  value={selectedNote}
+                  onChange={(event) => updateSelectedNote(event.target.value)}
+                  placeholder="Capture the contribution, methodology, surprises, or reproduction notes for this paper."
+                  disabled={!selectedDocument}
+                />
+              </section>
+
+              <section className="panel-section assistant-panel">
+                <div className="section-heading">
+                  <div>
+                    <p className="section-kicker">Grounded Assistant</p>
+                    <h2>Paper Copilot</h2>
+                  </div>
+                  <span className="chip">Shared AI</span>
+                </div>
+                <PaperLabChatPanel
+                  projectId={projectId}
+                  title="Paper Workspace Assistant"
+                  description="Same AI capability as the console workspace, but scoped around the active paper and reading session."
+                  placeholder="Ask for explanations, method breakdowns, figure interpretation, or reproduction hints..."
+                  contextLabel={
+                    selectedDocument
+                      ? `Active paper: ${selectedDocument.title}`
+                      : "Scope: library without pinned paper"
+                  }
+                  compact
+                />
+              </section>
+
+              <section className="panel-section task-section">
+                <div className="section-heading">
+                  <div>
+                    <p className="section-kicker">Ingestion Monitoring</p>
+                    <h2>Task History</h2>
+                  </div>
+                  <span className="chip">{filteredTasks.length}</span>
+                </div>
+                <div className="task-filter-row">
+                  {(["all", "active", "failed", "completed"] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      className={`task-filter-button ${taskFilter === filter ? "active" : ""}`}
+                      onClick={() => setTaskFilter(filter)}
+                    >
+                      {capitalize(filter)}
+                    </button>
                   ))}
+                </div>
+                {filteredTasks.length === 0 ? (
+                  <div className="empty-state-card compact">
+                    <strong>No ingestion tasks yet</strong>
+                    <p>Queue a paper to see recent ingestion activity here.</p>
+                  </div>
+                ) : (
+                  <div className="task-list">
+                    {filteredTasks.map((task) => (
+                      <article className="task-card" key={task.task_id}>
+                        <div className="task-head">
+                          <strong>{task.result?.status || task.state}</strong>
+                          <StatusBadge state={task.state} />
+                        </div>
+                        <p className="task-path">{task.path}</p>
+                        <p className="task-meta">
+                          {task.result?.message || task.error_message || "Waiting for execution."}
+                        </p>
+                        <p className="task-meta">Created: {formatDate(task.created_at)}</p>
+                        {task.started_at ? (
+                          <p className="task-meta">Started: {formatDate(task.started_at)}</p>
+                        ) : null}
+                        {task.finished_at ? (
+                          <p className="task-meta">Finished: {formatDate(task.finished_at)}</p>
+                        ) : null}
+                        {task.error_code ? (
+                          <p className="task-meta">
+                            {task.error_code}
+                            {task.retryable ? " · retryable" : ""}
+                            {task.timed_out ? " · timed out" : ""}
+                          </p>
+                        ) : null}
+                        {task.state === "failed" && task.retryable ? (
+                          <button className="button subtle task-retry-button" onClick={() => void retryTask(task)}>
+                            Retry Task
+                          </button>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
+          </aside>
+        </section>
+      ) : (
+        <section
+          className="ai-workspace"
+          id="ai-workspace-panel"
+          role="tabpanel"
+          aria-labelledby="ai-workspace-tab"
+        >
+          <aside className="workspace-panel ai-sidebar">
+            <section className="panel-section">
+              <div className="section-heading">
+                <div>
+                  <p className="section-kicker">Workspace Scope</p>
+                  <h2>Project Lens</h2>
+                </div>
+                <span className="chip">Same AI</span>
+              </div>
+              <div className="info-grid single-column">
+                <article className="info-card">
+                  <span className="info-label">Project Id</span>
+                  <strong>{projectId}</strong>
+                  <p>Shared assistant runtime and retrieval scope</p>
+                </article>
+                <article className="info-card">
+                  <span className="info-label">Pinned Paper</span>
+                  <strong>{selectedDocument?.title || "None selected"}</strong>
+                  <p>Return to Paper Workspace when you need side-by-side reading.</p>
+                </article>
+                <article className="info-card">
+                  <span className="info-label">Use Case</span>
+                  <strong>Analysis and reproduction planning</strong>
+                  <p>Best for cross-paper reasoning, open-ended planning, and longer task breakdowns.</p>
+                </article>
+              </div>
+            </section>
+          </aside>
+
+          <section className="workspace-panel ai-main">
+            <div className="workspace-toolbar">
+              <div>
+                <p className="section-kicker">AI Workspace</p>
+                <h2>AI Research Console</h2>
+                <p className="toolbar-copy">
+                  The same assistant capability, now in a conversation-first layout without the PDF
+                  reader.
+                </p>
+              </div>
+              <div className="button-row">
+                <button className="button subtle" onClick={() => setWorkspace("paper")}>
+                  Return to Paper Workspace
+                </button>
+                {selectedDocument ? (
+                  <button className="button primary" onClick={() => openReader(selectedDocument)}>
+                    Open Selected Paper
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            <PaperLabChatPanel
+              projectId={projectId}
+              title="AI Workspace Assistant"
+              description="Use the same grounded assistant for analysis, comparison, reproduction planning, and broader research tasks."
+              placeholder="Ask for synthesis, comparison, implementation planning, or reproduction strategies..."
+              contextLabel={
+                selectedDocument
+                  ? `Pinned context available: ${selectedDocument.title}`
+                  : "Scope: whole project workspace"
+              }
+            />
+          </section>
+
+          <aside className="workspace-panel ai-context">
+            <div className="ai-context-stack">
+              <section className="panel-section">
+                <div className="section-heading">
+                  <div>
+                    <p className="section-kicker">Execution Context</p>
+                    <h2>Research Notes</h2>
+                  </div>
+                  <span className="chip">Console Sidecar</span>
+                </div>
+                <div className="info-grid single-column">
+                  <article className="info-card">
+                    <span className="info-label">Recommended Uses</span>
+                    <strong>Explain, compare, reproduce</strong>
+                    <p>Use this workspace when the conversation should stay central and the PDF should not dominate the layout.</p>
+                  </article>
+                  <article className="info-card">
+                    <span className="info-label">Evidence Flow</span>
+                    <strong>Shared with Paper Workspace</strong>
+                    <p>Citations, evidence counts, and project scope still come from the same assistant runtime.</p>
+                  </article>
+                  <article className="info-card">
+                    <span className="info-label">Hand-off</span>
+                    <strong>Reader remains one click away</strong>
+                    <p>When the assistant points to a specific paper, move back to the Paper Workspace to read and annotate in place.</p>
+                  </article>
                 </div>
               </section>
             </div>
-          ) : null}
-        </>
-      ) : (
-        <section className="shell solo-shell">
-          <header className="hero">
-            <div>
-              <p className="eyebrow">SOLO Mode</p>
-              <h1>Agent Conversation Console</h1>
-              <p className="subtext">
-                This mode will be the landing zone for LangGraph agent chat. The library and reader context can be
-                shared into the conversation panel later.
-              </p>
-            </div>
-          </header>
-
-          <section className="solo-grid">
-            <div className="panel solo-card">
-              <PaperLabChatPanel
-                projectId={projectId}
-                title="SOLO Conversation"
-                description="Official LangGraph stream and assistant-ui runtime for the main agent workspace."
-                placeholder="Ask a grounded question and stream the answer..."
-                contextLabel={selectedDocument ? `Selected: ${selectedDocument.title}` : "No document pinned"}
-              />
-            </div>
-            <div className="panel solo-card">
-              <h2>Shared Context</h2>
-              <p>Current selected document: {selectedDocument?.title || "None"}</p>
-              <p>Scanned documents: {documents.length}</p>
-              <p>Queued ingestion tasks: {Object.keys(taskByPath).length}</p>
-              <p>FastAPI capabilities stay available for scan, ingest, file serving, and retrieval debugging.</p>
-            </div>
-          </section>
+          </aside>
         </section>
       )}
+
+      {contextMenu.visible && contextMenu.document ? (
+        <div
+          className="context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button className="context-menu-item" onClick={() => openReader(contextMenu.document!)}>
+            Open Reader
+          </button>
+          <button className="context-menu-item" onClick={() => void loadDocumentImages(contextMenu.document!)}>
+            Open Figure Gallery
+          </button>
+          <button
+            className="context-menu-item"
+            onClick={() => void queueIngestion(contextMenu.document!)}
+            disabled={
+              ingestingDocumentId === contextMenu.document.id ||
+              isTaskActive(getTaskForDocument(contextMenu.document, taskByPath))
+            }
+          >
+            {ingestingDocumentId === contextMenu.document.id
+              ? "Queueing..."
+              : getDocumentActionLabel(contextMenu.document, taskByPath)}
+          </button>
+        </div>
+      ) : null}
+
+      {galleryOpen ? (
+        <div className="modal-backdrop" onClick={closeGallery}>
+          <section className="modal-panel" onClick={(event) => event.stopPropagation()}>
+            <header className="modal-header">
+              <div>
+                <p className="section-kicker">Figure Gallery</p>
+                <h2>{galleryDocument?.title || "Figure Gallery"}</h2>
+                <p className="toolbar-copy">{galleryDocument?.path}</p>
+              </div>
+              <button className="button subtle" onClick={closeGallery}>
+                Close
+              </button>
+            </header>
+
+            {loadingImages ? <p className="loading-copy">Loading extracted visual assets...</p> : null}
+            {!loadingImages && documentImages.length === 0 ? (
+              <div className="empty-state-card">
+                <strong>No extracted figures</strong>
+                <p>No body figures were extracted from this paper.</p>
+              </div>
+            ) : null}
+
+            <div className="gallery-grid">
+              {documentImages.map((image) => (
+                <article className="gallery-card" key={image.id}>
+                  {image.preview_url ? (
+                    <img
+                      className="gallery-image"
+                      src={image.preview_url}
+                      alt={image.asset_label || image.file_name}
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="gallery-image empty-image">Preview unavailable</div>
+                  )}
+                  <div className="gallery-copy">
+                    <strong>{image.figure_label || image.asset_label || `Page ${image.page_number}`}</strong>
+                    <p>{image.summary || image.caption || "No extracted summary."}</p>
+                    <small>{image.caption || `${image.asset_type} · page ${image.page_number}`}</small>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
+}
+
+function StatusBadge({ state }: { state: string }) {
+  return <span className={`status-badge state-${state.toLowerCase()}`}>{humanizeState(state)}</span>;
+}
+
+function renderTaskState(
+  document: ScannedDocument,
+  taskByPath: Record<string, IngestionTaskSummary>,
+) {
+  const task = taskByPath[document.path];
+  if (!task) {
+    return document.ingested ? "Indexed" : "Pending";
+  }
+  return task.state;
+}
+
+function getTaskForDocument(
+  document: ScannedDocument,
+  taskByPath: Record<string, IngestionTaskSummary>,
+) {
+  return taskByPath[document.path];
+}
+
+function isTaskActive(task?: IngestionTaskSummary | null) {
+  return task?.state === "queued" || task?.state === "running";
+}
+
+function getDocumentActionLabel(
+  document: ScannedDocument,
+  taskByPath: Record<string, IngestionTaskSummary>,
+) {
+  const task = getTaskForDocument(document, taskByPath);
+  if (document.ingested) {
+    return "Re-ingest Paper";
+  }
+  if (task?.state === "failed") {
+    return "Retry Ingest";
+  }
+  if (isTaskActive(task)) {
+    return "Ingesting...";
+  }
+  return "Ingest Paper";
+}
+
+function formatDate(value?: string | null) {
+  if (!value) {
+    return "Unknown";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
+function capitalize(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function humanizeState(value: string) {
+  return value.replace(/_/g, " ");
 }
 
 export default App;

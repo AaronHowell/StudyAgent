@@ -1,7 +1,5 @@
 """Retrieval specialist subgraph for PaperLab."""
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 from uuid import uuid4

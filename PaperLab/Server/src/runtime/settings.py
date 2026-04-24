@@ -20,7 +20,6 @@ load_dotenv(ROOT_ENV_PATH)
 class AgentSettings:
     """Minimal settings required by the LangGraph runtime."""
 
-    assistant_id: str = "paperlab"
     default_project_id: str = "default-project"
     mysql_host: str = "10.201.0.86"
     mysql_port: int = 3306
@@ -125,7 +124,6 @@ class AgentSettings:
     def from_env(cls) -> "AgentSettings":
         mcp_servers = cls._json_env("PAPERLAB_MCP_SERVERS_JSON")
         return cls(
-            assistant_id=os.getenv("PAPERLAB_LANGGRAPH_ASSISTANT_ID", "paperlab"),
             default_project_id=os.getenv("PAPERLAB_DEFAULT_PROJECT_ID", "default-project"),
             mysql_host=os.getenv("PAPERLAB_MYSQL_HOST", "10.201.0.86"),
             mysql_port=cls._int_env("PAPERLAB_MYSQL_PORT", 3306),
