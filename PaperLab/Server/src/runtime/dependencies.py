@@ -235,6 +235,9 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
             port=parsed_qdrant_url.port or 6333,
             api_key=resolved.qdrant_api_key,
             timeout_seconds=resolved.qdrant_timeout_seconds,
+            collection_name=resolved.qdrant_chunk_collection_name,
+            asset_collection_name=resolved.qdrant_asset_collection_name,
+            document_collection_name=resolved.qdrant_document_collection_name,
         )
     )
 

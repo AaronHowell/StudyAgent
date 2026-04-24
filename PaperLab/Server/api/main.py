@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
+import base64
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -15,6 +16,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 import pymysql
 import uvicorn
@@ -37,9 +39,12 @@ from integrations import (
     OpenAICompatibleEmbeddingProvider,
     QdrantChunkVectorStore,
     QdrantConnectionConfig,
+    RedisCacheConfig,
+    RedisCacheStore,
 )
 
 from api.chat import router as chat_router
+from api.chat import session_router
 from api.config import Settings
 from api.ingestion import IngestionTaskManager
 from api.schemas import (
@@ -64,6 +69,8 @@ from api.schemas import (
     RetrievalEvidenceResponse,
     ScanDocumentsRequest,
     ScanDocumentsResponse,
+    SelectProjectFolderRequest,
+    SelectProjectFolderResponse,
 )
 
 settings = Settings.from_env()
@@ -76,9 +83,36 @@ class ApiServices:
     document_repository: MySQLDocumentRepository
     asset_repository: MySQLDocumentAssetRepository
     chunk_repository: MySQLChunkRepository
+    cache_store: RedisCacheStore | None
     retrieve_evidence_use_case: RetrieveEvidenceUseCase | None
     answer_question_use_case: AnswerQuestionUseCase | None
     ingestion_task_manager: IngestionTaskManager
+
+
+def _select_directory_path(current_path: str | None = None) -> str:
+    """Open a native folder picker and return one absolute path."""
+
+    try:
+        from tkinter import Tk
+        from tkinter import filedialog
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Native folder picker is unavailable in the current environment.") from exc
+
+    initial_dir = ""
+    if current_path:
+        candidate = Path(current_path).expanduser()
+        if candidate.exists():
+            initial_dir = str(candidate.resolve())
+
+    root = Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        selected = filedialog.askdirectory(initialdir=initial_dir or str(Path.home()))
+    finally:
+        root.destroy()
+
+    return str(Path(selected).expanduser().resolve()) if selected else ""
 
 
 @lru_cache(maxsize=1)
@@ -132,6 +166,9 @@ def get_services() -> ApiServices:
                 port=parsed_qdrant_url.port or 6333,
                 api_key=settings.qdrant_api_key,
                 timeout_seconds=settings.qdrant_timeout_seconds,
+                collection_name=settings.qdrant_chunk_collection_name,
+                asset_collection_name=settings.qdrant_asset_collection_name,
+                document_collection_name=settings.qdrant_document_collection_name,
             )
         )
 
@@ -182,6 +219,18 @@ def get_services() -> ApiServices:
             retrieve_evidence_use_case=retrieve_evidence_use_case,
             llm_provider=llm_provider,
         )
+    cache_store = None
+    if settings.redis_host:
+        try:
+            cache_store = RedisCacheStore(
+                RedisCacheConfig(
+                    host=settings.redis_host,
+                    port=settings.redis_port,
+                    password=settings.redis_password,
+                )
+            )
+        except RuntimeError:
+            cache_store = None
 
     return ApiServices(
         document_scanner=document_scanner,
@@ -189,6 +238,7 @@ def get_services() -> ApiServices:
         document_repository=document_repository,
         asset_repository=asset_repository,
         chunk_repository=chunk_repository,
+        cache_store=cache_store,
         retrieve_evidence_use_case=retrieve_evidence_use_case,
         answer_question_use_case=answer_question_use_case,
         ingestion_task_manager=IngestionTaskManager(
@@ -219,6 +269,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(chat_router)
+app.include_router(session_router)
+
+
+@app.post("/desktop/project-folder/select", response_model=SelectProjectFolderResponse)
+def select_project_folder(payload: SelectProjectFolderRequest) -> SelectProjectFolderResponse:
+    """Open a native folder picker and return the selected absolute path."""
+
+    try:
+        selected_path = _select_directory_path(payload.current_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return SelectProjectFolderResponse(path=selected_path)
 
 
 def is_document_ingested(document_id: str) -> bool:
@@ -334,38 +397,53 @@ def get_document_images(payload: DocumentImagesRequest) -> DocumentImagesRespons
 
     services = get_services()
     document = services.document_scanner.build_document_record("frontend-project", pdf_path)
-    document = type(document)(
-        id=document.id,
-        project_id=document.project_id,
-        path=document.path,
-        file_name=document.file_name,
-        doc_type=DocumentType.PDF,
-        title=document.title,
-        status=DocumentStatus.DISCOVERED,
-        content_hash=document.content_hash,
-    )
-    parse_result = services.pdf_parser.parse_pdf(document, include_images=True, export_image_files=True)
-
-    image_items = [
-        DocumentImageItem(
-            id=image.id,
-            document_id=image.document_id,
-            page_number=image.page_number,
-            file_name=image.file_name,
-            file_path=image.file_path,
-            file_url=f"/documents/file?path={quote(image.file_path)}" if image.file_path else "",
-            asset_kind=image.asset_kind,
-            asset_label=image.asset_label,
-            asset_index=image.asset_index,
-            figure_label=image.figure_label,
-            figure_index=image.figure_index,
-            caption=image.caption,
-            summary=image.summary,
-            asset_type=image.asset_type,
-            keywords=image.keywords,
+    stored_document = services.document_repository.get_by_id(document.id)
+    if stored_document is not None:
+        images = services.asset_repository.list_by_document(stored_document.id)
+    else:
+        document = type(document)(
+            id=document.id,
+            project_id=document.project_id,
+            path=document.path,
+            file_name=document.file_name,
+            doc_type=DocumentType.PDF,
+            title=document.title,
+            status=DocumentStatus.DISCOVERED,
+            content_hash=document.content_hash,
         )
-        for image in parse_result.images
-    ]
+        parse_result = services.pdf_parser.parse_pdf(
+            document,
+            include_images=True,
+            export_image_files=False,
+        )
+        images = parse_result.images
+
+    image_items = []
+    for image in images:
+        preview_data_url = ""
+        if image.content_bytes:
+            encoded = base64.b64encode(image.content_bytes).decode("ascii")
+            preview_data_url = f"data:{image.media_type or 'application/octet-stream'};base64,{encoded}"
+        image_items.append(
+            DocumentImageItem(
+                id=image.id,
+                document_id=image.document_id,
+                page_number=image.page_number,
+                file_name=image.file_name,
+                file_path=image.file_path,
+                file_url=f"/documents/assets/{quote(image.id)}/content",
+                preview_data_url=preview_data_url,
+                asset_kind=image.asset_kind,
+                asset_label=image.asset_label,
+                asset_index=image.asset_index,
+                figure_label=image.figure_label,
+                figure_index=image.figure_index,
+                caption=image.caption,
+                summary=image.summary,
+                asset_type=image.asset_type,
+                keywords=image.keywords,
+            )
+        )
 
     return DocumentImagesResponse(path=str(pdf_path), images=image_items)
 
@@ -465,6 +543,30 @@ def get_document_file(path: str = Query(..., description="Absolute path to a loc
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {target_path}")
     return FileResponse(target_path)
+
+
+@app.get("/documents/assets/{asset_id}/content")
+def get_asset_content(asset_id: str) -> Response:
+    """Serve one stored asset binary payload, with Redis as a short-lived cache."""
+
+    services = get_services()
+    cached_payload = services.cache_store.load_cached_asset_content(asset_id) if services.cache_store else None
+    if cached_payload is not None:
+        media_type, content = cached_payload
+        return Response(content=content, media_type=media_type)
+
+    stored_payload = services.asset_repository.load_content(asset_id)
+    if stored_payload is None:
+        raise HTTPException(status_code=404, detail=f"Asset content not found: {asset_id}")
+
+    media_type, content = stored_payload
+    if services.cache_store is not None:
+        services.cache_store.save_cached_asset_content(
+            asset_id,
+            media_type=media_type,
+            content=content,
+        )
+    return Response(content=content, media_type=media_type or "application/octet-stream")
 
 
 @app.post("/retrieval/evidence", response_model=RetrievalEvidenceResponse)

@@ -99,7 +99,16 @@ def build_synthesis_prompt(
     result_blocks = [payload for payload in specialist_payloads if payload]
     if result_blocks:
         synthesis_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
-    synthesis_parts.append("Write one grounded answer using the strongest available evidence.")
+    synthesis_parts.append(
+        "Return valid JSON with exactly two top-level keys: "
+        "`answer` and `summary`. "
+        "`answer` is the user-facing grounded reply. "
+        "`summary` must be an object with string fields `done`, `next`, and `pending`. "
+        "`done` should briefly state what this step completed. "
+        "`next` should state the most useful next follow-up. "
+        "`pending` should state what is still missing, uncertain, or not yet done. "
+        "Do not include chain-of-thought or extra keys."
+    )
     return "\n\n".join(synthesis_parts)
 
 

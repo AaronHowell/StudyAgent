@@ -42,6 +42,8 @@ from orchestration.graph_serialization import (
     _serialize_evidence_pack,
     _serialize_memory_item,
 )
+from orchestration.output_summary import build_progress_summary
+from orchestration.output_summary import parse_structured_assistant_output
 from orchestration.graph_state import PaperLabGraphState
 from orchestration.request_config import AgentRequestConfig
 from orchestration.request_config import resolve_agent_request_config
@@ -828,13 +830,16 @@ async def synthesize_node(
         ],
     )
     raw_answer = await _runtime().chat_model.ainvoke(synthesis_prompt)
+    answer_text, progress_summary = parse_structured_assistant_output(
+        _message_text(getattr(raw_answer, "content", raw_answer))
+    )
 
     retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
     tool_metadata = dict(tool_result.get("metadata", {}) or {})
     workspace_metadata = dict(workspace_result.get("metadata", {}) or {})
     assistant_message = _build_assistant_message(
         turn_id=turn_id,
-        content=_message_text(getattr(raw_answer, "content", raw_answer)),
+        content=answer_text,
         metadata={
             "artifact_type": "answer",
             "depends_on": dependencies,
@@ -851,6 +856,12 @@ async def synthesize_node(
             "answer_confident": bool(state.get("answer_confident", False)),
             "stop_reason": str(state.get("stop_reason") or ""),
             "intervention_count": int(state.get("intervention_count", 0) or 0),
+            "summary": progress_summary,
+            "worker_progress": {
+                "retrieval": dict(retrieve_metadata.get("progress_summary", {}) or {}),
+                "tool": dict(tool_metadata.get("progress_summary", {}) or {}),
+                "workspace": dict(workspace_metadata.get("progress_summary", {}) or {}),
+            },
         },
         raw_id=getattr(raw_answer, "id", None),
     )

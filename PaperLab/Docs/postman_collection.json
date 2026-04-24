@@ -1,0 +1,441 @@
+{
+  "info": {
+    "name": "PaperLab API",
+    "description": "Auto-generated from FastAPI OpenAPI schema.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "/agent/answer/stream",
+      "item": [
+        {
+          "name": "Stream Agent Answer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/answer/stream",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "answer",
+                "stream"
+              ]
+            },
+            "description": "Stream one grounded answer as server-sent events.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/AgentAnswerStreamRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/chat/state",
+      "item": [
+        {
+          "name": "Get Chat State",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/chat/state",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "chat",
+                "state"
+              ],
+              "query": [
+                {
+                  "key": "project_id",
+                  "value": "",
+                  "description": "Target project identifier"
+                },
+                {
+                  "key": "thread_id",
+                  "value": "",
+                  "description": "Graph thread identifier"
+                }
+              ]
+            },
+            "description": "Get Chat State"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/chat/stream",
+      "item": [
+        {
+          "name": "Stream Chat Run",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/chat/stream",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "chat",
+                "stream"
+              ]
+            },
+            "description": "Stream Chat Run",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/ChatRunRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/assets/{asset_id}/content",
+      "item": [
+        {
+          "name": "Get Asset Content",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/documents/assets/{asset_id}/content",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "assets",
+                "{asset_id}",
+                "content"
+              ]
+            },
+            "description": "Serve one stored asset binary payload, with Redis as a short-lived cache."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/file",
+      "item": [
+        {
+          "name": "Get Document File",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/documents/file",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "file"
+              ],
+              "query": [
+                {
+                  "key": "path",
+                  "value": "",
+                  "description": "Absolute path to a local file"
+                }
+              ]
+            },
+            "description": "Serve a local file for PDF preview or image preview."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/images",
+      "item": [
+        {
+          "name": "Get Document Images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/documents/images",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "images"
+              ]
+            },
+            "description": "Extract lightweight image information for one PDF document.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/DocumentImagesRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/ingest",
+      "item": [
+        {
+          "name": "List Ingestion Tasks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/documents/ingest",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "ingest"
+              ]
+            },
+            "description": "Return recent ingestion tasks for the desktop UI."
+          },
+          "response": []
+        },
+        {
+          "name": "Ingest Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/documents/ingest",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "ingest"
+              ]
+            },
+            "description": "Queue one local document for background ingestion.\n\n作用:\n    将入库流程放到后台线程池中执行，避免前端请求被长时间阻塞。\n\nArgs:\n    payload: 文档路径和目标项目的请求体。\n\nReturns:\n    IngestDocumentResponse: 新建或复用的任务信息。",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/IngestDocumentRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/ingest/batch",
+      "item": [
+        {
+          "name": "Batch Ingest Documents",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/documents/ingest/batch",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "ingest",
+                "batch"
+              ]
+            },
+            "description": "Queue multiple documents for background ingestion.\n\n作用:\n    为文档库页提供批量入库入口，适合同一项目下把多篇论文一起送入后台线程池。",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/BatchIngestDocumentsRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/ingest/{task_id}",
+      "item": [
+        {
+          "name": "Get Ingestion Task",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/documents/ingest/{task_id}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "ingest",
+                "{task_id}"
+              ]
+            },
+            "description": "Return current status for one background ingestion task."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/ingestion-status",
+      "item": [
+        {
+          "name": "Get Document Ingestion Status",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/documents/ingestion-status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "ingestion-status"
+              ]
+            },
+            "description": "Check whether one local document has already been ingested.\n\n作用:\n    根据文档路径构造稳定的文档 id，并查询该文档是否已存在于数据库中。\n\nArgs:\n    payload: 包含本地文档路径的请求体。\n\nReturns:\n    DocumentIngestionStatusResponse: 当前文档的入库状态响应。",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/DocumentIngestionStatusRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/documents/scan",
+      "item": [
+        {
+          "name": "Scan Documents",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/documents/scan",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "documents",
+                "scan"
+              ]
+            },
+            "description": "Scan a local folder and return discovered PDF documents.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/ScanDocumentsRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/healthz",
+      "item": [
+        {
+          "name": "Healthz",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/healthz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
+            "description": "Return a minimal health payload for local smoke tests."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "/retrieval/evidence",
+      "item": [
+        {
+          "name": "Retrieve Evidence",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/retrieval/evidence",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "retrieval",
+                "evidence"
+              ]
+            },
+            "description": "Run document, chunk, and asset retrieval and return one evidence pack.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"$ref\": \"#/components/schemas/RetrieveEvidenceRequest\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

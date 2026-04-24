@@ -8,6 +8,7 @@ from contracts import AgentArtifact
 from contracts import AgentResult
 from contracts import AgentTask
 from orchestration.graph_messages import _build_agent_result_message
+from orchestration.output_summary import build_progress_summary
 from orchestration.graph_serialization import _build_evidence_counts
 from orchestration.graph_serialization import _serialize_evidence_pack
 from orchestration.graph_serialization import build_assistant_metadata
@@ -57,7 +58,14 @@ async def run_retrieve_specialist(
             summary=message,
             artifacts=[],
             confidence=0.0,
-            metadata={"cancelled": True},
+            metadata={
+                "cancelled": True,
+                "progress_summary": build_progress_summary(
+                    done=message,
+                    next="等待新的检索任务",
+                    pending="当前检索未完成",
+                ),
+            },
         )
 
     if cancel_token is not None and cancel_token.is_cancelled():
@@ -207,7 +215,17 @@ def _build_result(*, task: AgentTask, evidence_pack: Any) -> AgentResult:
         confidence=0.8 if evidence_pack.citations else 0.25,
         metadata=artifact.metadata,
     )
-
+    result.metadata["progress_summary"] = build_progress_summary(
+        done=result.summary,
+        next="可继续基于引用展开回答或比较证据",
+        pending=(
+            "还没有足够强的本地引用证据"
+            if not evidence_pack.citations
+            else "尚未结合外部工具或工作区信息"
+        ),
+    )
+    return result
+    
 
 async def retrieve_agent_execute_node(
     state: RetrieveAgentGraphState,

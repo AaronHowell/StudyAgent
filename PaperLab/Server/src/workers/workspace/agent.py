@@ -14,6 +14,7 @@ from integrations.sandbox import get_sandbox_runner
 from orchestration.graph_messages import _build_agent_result_message
 from orchestration.graph_messages import _coerce_tool_call_args
 from orchestration.graph_messages import _extract_tool_calls
+from orchestration.output_summary import build_progress_summary
 from orchestration.graph_state import WorkspaceAgentGraphState
 from orchestration.request_config import _coerce_positive_int
 from orchestration.runtime_access import _runtime
@@ -234,7 +235,15 @@ async def run_workspace_specialist(*, task: AgentTask) -> AgentResult:
             summary="WorkspaceAgent did not select a workspace action.",
             artifacts=[],
             confidence=0.0,
-            metadata={"workspace_sources": [], "workspace_action": ""},
+            metadata={
+                "workspace_sources": [],
+                "workspace_action": "",
+                "progress_summary": build_progress_summary(
+                    done="已尝试规划工作区动作，但未选出可执行项",
+                    next="可补充更明确的工作区任务",
+                    pending="工作区信息尚未获取",
+                ),
+            },
         )
 
     tool_call = selection_calls[0]
@@ -250,7 +259,16 @@ async def run_workspace_specialist(*, task: AgentTask) -> AgentResult:
             summary=f"WorkspaceAgent failed while running {action}: {exc}",
             artifacts=[],
             confidence=0.0,
-            metadata={"workspace_sources": [], "workspace_action": action, "error": str(exc)},
+            metadata={
+                "workspace_sources": [],
+                "workspace_action": action,
+                "error": str(exc),
+                "progress_summary": build_progress_summary(
+                    done=f"已尝试执行工作区动作 {action}",
+                    next="修正参数或环境后可重试",
+                    pending="目标工作区结果尚未拿到",
+                ),
+            },
         )
 
     return AgentResult(
@@ -273,6 +291,11 @@ async def run_workspace_specialist(*, task: AgentTask) -> AgentResult:
         metadata={
             "workspace_action": action,
             "workspace_sources": result.get("workspace_sources", []),
+            "progress_summary": build_progress_summary(
+                done=str(result.get("summary") or ""),
+                next="可继续根据工作区结果做综合回答或下一步修改",
+                pending="尚未确认是否还需要更多仓库上下文或执行结果",
+            ),
         },
     )
 

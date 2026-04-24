@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
 
 from documents.pdf_parser import PdfParser
 from domain import (
@@ -273,7 +272,9 @@ class LocalDocumentScanner:
             raise ValueError(f"Unsupported document type for path: {path}")
 
         normalized_path = path.resolve()
-        document_id = str(uuid5(NAMESPACE_URL, f"{project_id}:{normalized_path.as_posix()}"))
+        content_hash = self.compute_content_hash(normalized_path)
+        safe_name = normalized_path.stem.replace(" ", "_")
+        document_id = f"{project_id}:{safe_name}:{content_hash[:12]}"
 
         return Document(
             id=document_id,
@@ -283,7 +284,7 @@ class LocalDocumentScanner:
             doc_type=document_type,
             title=self.build_document_title(normalized_path),
             status=DocumentStatus.DISCOVERED,
-            content_hash=self.compute_content_hash(normalized_path),
+            content_hash=content_hash,
         )
 
     def build_skip_result(self, path: Path, reason: str) -> DocumentDiscoveryResult:

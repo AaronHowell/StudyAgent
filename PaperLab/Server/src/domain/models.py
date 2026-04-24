@@ -89,6 +89,8 @@ class DocumentAsset:
     keywords: list[str] = field(default_factory=list)
     related_chunk_ids: list[str] = field(default_factory=list)
     media_type: str | None = None
+    byte_size: int = 0
+    content_bytes: bytes | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

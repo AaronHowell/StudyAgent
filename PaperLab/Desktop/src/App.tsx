@@ -4,10 +4,14 @@ import type { DocumentImage, ScannedDocument } from "./types";
 
 type WorkspaceView = "paper" | "ai";
 type PaperView = "library" | "reader";
-type TaskFilter = "all" | "active" | "failed" | "completed";
 
 type GalleryImage = DocumentImage & {
   preview_url: string;
+};
+
+type DesktopPreferences = {
+  rootPath: string;
+  projectId: string;
 };
 
 type IngestionTaskSummary = {
@@ -32,16 +36,23 @@ type IngestionTaskSummary = {
   timed_out?: boolean;
 };
 
-const apiBase =
-  import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
+const apiBase = import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
+const desktopPreferencesKey = "paperlab.desktop.preferences";
+const documentsPerPage = 10;
+const defaultPreferences: DesktopPreferences = {
+  rootPath: "",
+  projectId: "default-project",
+};
 
 function App() {
+  const [initialPreferences] = useState(loadDesktopPreferences);
   const [workspace, setWorkspace] = useState<WorkspaceView>("paper");
   const [paperView, setPaperView] = useState<PaperView>("library");
-  const [rootPath, setRootPath] = useState("C:\\Users\\Aaron_Howell\\Desktop\\postgraduate");
-  const [projectId, setProjectId] = useState("frontend-project");
+  const [rootPath, setRootPath] = useState(initialPreferences.rootPath);
+  const [projectId, setProjectId] = useState(initialPreferences.projectId);
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [loadingImages, setLoadingImages] = useState(false);
+  const [choosingFolder, setChoosingFolder] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [documents, setDocuments] = useState<ScannedDocument[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<ScannedDocument | null>(null);
@@ -63,57 +74,37 @@ function App() {
   const [ingestingDocumentId, setIngestingDocumentId] = useState<string | null>(null);
   const [batchIngesting, setBatchIngesting] = useState(false);
   const [taskByPath, setTaskByPath] = useState<Record<string, IngestionTaskSummary>>({});
-  const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
+  const [showAiProjectEditor, setShowAiProjectEditor] = useState(false);
+  const [currentDocumentPage, setCurrentDocumentPage] = useState(1);
 
-  const selectedPdfUrl = useMemo(() => {
-    if (!selectedDocument) {
-      return "";
-    }
-    return buildDocumentFileUrl(selectedDocument.path);
-  }, [selectedDocument]);
-
+  const selectedPdfUrl = useMemo(
+    () => (selectedDocument ? buildDocumentFileUrl(selectedDocument.path) : ""),
+    [selectedDocument],
+  );
   const selectedNote = selectedDocument ? notesByDocumentId[selectedDocument.id] ?? "" : "";
-  const pendingDocumentCount = useMemo(
-    () =>
-      documents.filter((document) => {
-        const task = getTaskForDocument(document, taskByPath);
-        return !document.ingested && !isTaskActive(task);
-      }).length,
-    [documents, taskByPath],
-  );
-  const activeTaskCount = useMemo(
-    () =>
-      Object.values(taskByPath).filter((task) => task.state === "queued" || task.state === "running")
-        .length,
-    [taskByPath],
-  );
-  const completedDocumentCount = useMemo(
-    () => documents.filter((document) => document.ingested).length,
-    [documents],
-  );
-  const orderedTasks = useMemo(
-    () =>
-      Object.values(taskByPath).sort((left, right) =>
-        right.created_at.localeCompare(left.created_at),
-      ),
-    [taskByPath],
-  );
-  const filteredTasks = useMemo(() => {
-    switch (taskFilter) {
-      case "active":
-        return orderedTasks.filter((task) => task.state === "queued" || task.state === "running");
-      case "failed":
-        return orderedTasks.filter((task) => task.state === "failed");
-      case "completed":
-        return orderedTasks.filter((task) => task.state === "completed");
-      default:
-        return orderedTasks;
-    }
-  }, [orderedTasks, taskFilter]);
+  const totalDocumentPages = Math.max(1, Math.ceil(documents.length / documentsPerPage));
+  const paginatedDocuments = useMemo(() => {
+    const startIndex = (currentDocumentPage - 1) * documentsPerPage;
+    return documents.slice(startIndex, startIndex + documentsPerPage);
+  }, [currentDocumentPage, documents]);
+
+  useEffect(() => {
+    saveDesktopPreferences({ rootPath, projectId });
+  }, [rootPath, projectId]);
 
   useEffect(() => {
     void refreshTaskList();
   }, []);
+
+  useEffect(() => {
+    if (initialPreferences.rootPath) {
+      void scanDocuments(initialPreferences.rootPath);
+    }
+  }, []);
+
+  useEffect(() => {
+    setCurrentDocumentPage((current) => Math.min(current, totalDocumentPages));
+  }, [totalDocumentPages]);
 
   useEffect(() => {
     const handleWindowClick = () => {
@@ -138,7 +129,7 @@ function App() {
   useEffect(() => {
     return () => {
       for (const image of documentImages) {
-        if (image.preview_url) {
+        if (image.preview_url && image.preview_url.startsWith("blob:")) {
           URL.revokeObjectURL(image.preview_url);
         }
       }
@@ -166,7 +157,45 @@ function App() {
     };
   }, [taskByPath]);
 
-  async function scanDocuments() {
+  async function chooseProjectFolder() {
+    setChoosingFolder(true);
+    setErrorMessage("");
+
+    try {
+      const response = await fetch(`${apiBase}/desktop/project-folder/select`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          current_path: rootPath || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await toApiErrorMessage(response, "select-project-folder"));
+      }
+
+      const payload = (await response.json()) as { path: string };
+      if (!payload.path) {
+        return;
+      }
+
+      setRootPath(payload.path);
+      await scanDocuments(payload.path);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "选择项目目录失败");
+    } finally {
+      setChoosingFolder(false);
+    }
+  }
+
+  async function scanDocuments(targetRootPath = rootPath) {
+    if (!targetRootPath) {
+      setErrorMessage("请先选择项目目录。");
+      return;
+    }
+
     setLoadingDocuments(true);
     setErrorMessage("");
 
@@ -177,7 +206,7 @@ function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          root_path: rootPath,
+          root_path: targetRootPath,
         }),
       });
 
@@ -185,14 +214,19 @@ function App() {
         throw new Error(await response.text());
       }
 
-      const payload = (await response.json()) as { documents: ScannedDocument[] };
+      const payload = (await response.json()) as { documents: ScannedDocument[]; root_path?: string };
+      const nextRootPath = payload.root_path || targetRootPath;
+      setRootPath(nextRootPath);
       setDocuments(payload.documents);
-      setSelectedDocument(payload.documents[0] ?? null);
+      setCurrentDocumentPage(1);
+      setSelectedDocument((current) =>
+        payload.documents.find((document) => document.id === current?.id) ?? payload.documents[0] ?? null,
+      );
       setPaperView("library");
       resetGalleryImages();
       await refreshTaskList();
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Scan failed");
+      setErrorMessage(error instanceof Error ? error.message : "扫描论文失败");
     } finally {
       setLoadingDocuments(false);
     }
@@ -224,20 +258,10 @@ function App() {
         [document.path]: payload.task,
       }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Ingestion failed");
+      setErrorMessage(error instanceof Error ? error.message : "提交入库失败");
     } finally {
       setIngestingDocumentId(null);
     }
-  }
-
-  async function retryTask(task: IngestionTaskSummary) {
-    const targetDocument = documents.find((document) => document.path === task.path);
-    if (!targetDocument) {
-      setErrorMessage("Cannot retry this task because the document is not in the current list.");
-      return;
-    }
-
-    await queueIngestion(targetDocument);
   }
 
   async function batchIngestPendingDocuments() {
@@ -279,15 +303,10 @@ function App() {
         return next;
       });
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Batch ingestion failed");
+      setErrorMessage(error instanceof Error ? error.message : "批量入库失败");
     } finally {
       setBatchIngesting(false);
     }
-  }
-
-  function focusDocument(document: ScannedDocument) {
-    setSelectedDocument(document);
-    setWorkspace("paper");
   }
 
   function openReader(document: ScannedDocument) {
@@ -297,7 +316,7 @@ function App() {
     closeContextMenu();
   }
 
-  function backToLibrary() {
+  function closeReader() {
     setPaperView("library");
   }
 
@@ -324,10 +343,9 @@ function App() {
       }
 
       const payload = (await response.json()) as { images: DocumentImage[] };
-      const images = await buildGalleryImages(payload.images);
-      setDocumentImages(images);
+      setDocumentImages(await buildGalleryImages(payload.images));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Image extraction failed");
+      setErrorMessage(error instanceof Error ? error.message : "提取图片失败");
     } finally {
       setLoadingImages(false);
     }
@@ -337,7 +355,6 @@ function App() {
     if (!selectedDocument) {
       return;
     }
-
     setNotesByDocumentId((current) => ({
       ...current,
       [selectedDocument.id]: value,
@@ -373,7 +390,7 @@ function App() {
   function resetGalleryImages() {
     setDocumentImages((current) => {
       for (const image of current) {
-        if (image.preview_url) {
+        if (image.preview_url && image.preview_url.startsWith("blob:")) {
           URL.revokeObjectURL(image.preview_url);
         }
       }
@@ -385,11 +402,11 @@ function App() {
     const result: GalleryImage[] = [];
 
     for (const image of images) {
-      let previewUrl = "";
-      if (image.file_url) {
+      let previewUrl = image.preview_data_url || "";
+      if (!previewUrl && image.file_url) {
         const response = await fetch(`${apiBase}${image.file_url}`);
         if (!response.ok) {
-          throw new Error(`Failed to fetch image preview: ${image.file_name}`);
+          throw new Error(`无法加载图片预览：${image.file_name}`);
         }
         const imageBlob = await response.blob();
         previewUrl = URL.createObjectURL(imageBlob);
@@ -433,575 +450,337 @@ function App() {
         }),
       );
     } catch {
-      // Keep the current state if the task refresh fails.
+      // Keep current list when refresh fails.
     }
   }
 
-  const currentTask = selectedDocument ? taskByPath[selectedDocument.path] : undefined;
-  const selectedDocumentState = selectedDocument
-    ? renderTaskState(selectedDocument, taskByPath)
-    : "No paper selected";
+  const activeTaskCount = Object.values(taskByPath).filter(
+    (task) => task.state === "queued" || task.state === "running",
+  ).length;
+  const completedDocumentCount = documents.filter((document) => document.ingested).length;
+  const pendingDocumentCount = documents.filter((document) => {
+    const task = taskByPath[document.path];
+    return !document.ingested && !isTaskActive(task);
+  }).length;
 
   return (
     <main className="app-shell" onContextMenu={(event) => event.preventDefault()}>
-      <header className="app-shell-header">
-        <div className="app-brand">
-          <p className="app-kicker">PaperLab Desktop</p>
-          <h1>Research Control Center</h1>
-          <p className="app-subtitle">
-            Read papers, inspect figures, and direct the same AI assistant from either a paper-first
-            desk or a pure research console.
-          </p>
-        </div>
-
-        <div className="app-shell-meta">
-          <div className="project-chip-group">
-            <span className="chip">Project: {projectId}</span>
-            <span className="chip">Papers: {documents.length}</span>
-            <span className="chip">Active Tasks: {activeTaskCount}</span>
+      <header className="app-window-header">
+        <div className="app-window-title-group">
+          <div>
+            <p className="app-kicker">PaperLab</p>
+            <h1>{workspace === "paper" ? "论文工作台" : "AI 对话"}</h1>
           </div>
-          <div className="workspace-tabs" role="tablist" aria-label="Workspaces">
+          <div className="workspace-tabs" role="tablist" aria-label="工作区">
             <button
               className={`workspace-tab ${workspace === "paper" ? "active" : ""}`}
               role="tab"
-              id="paper-workspace-tab"
               aria-selected={workspace === "paper"}
-              aria-controls="paper-workspace-panel"
               onClick={() => setWorkspace("paper")}
             >
-              Paper Workspace
+              论文工作台
             </button>
             <button
               className={`workspace-tab ${workspace === "ai" ? "active" : ""}`}
               role="tab"
-              id="ai-workspace-tab"
               aria-selected={workspace === "ai"}
-              aria-controls="ai-workspace-panel"
               onClick={() => setWorkspace("ai")}
             >
-              AI Workspace
+              AI 对话
             </button>
           </div>
+        </div>
+
+        <div className="header-chip-row">
+          <span className="chip">项目：{projectId}</span>
+          <span className="chip">已扫描：{documents.length}</span>
+          <span className="chip">运行中：{activeTaskCount}</span>
         </div>
       </header>
 
       {errorMessage ? <p className="error-message app-error-banner">{errorMessage}</p> : null}
 
       {workspace === "paper" ? (
-        <section
-          className="paper-workspace"
-          id="paper-workspace-panel"
-          role="tabpanel"
-          aria-labelledby="paper-workspace-tab"
-        >
-          <aside className="workspace-panel desk-sidebar">
-            <section className="panel-section control-panel">
-              <div className="section-heading">
-                <div>
-                  <p className="section-kicker">Workspace Setup</p>
-                  <h2>Library Control</h2>
+        paperView === "library" ? (
+          <section className="paper-library-layout">
+            <aside className="workspace-panel library-sidebar">
+              <div className="panel-block">
+                <p className="section-kicker">项目</p>
+                <h2>库管理</h2>
+                <label className="field">
+                  <span>项目目录</span>
+                  <div className="folder-input-row">
+                    <input
+                      className="input"
+                      value={rootPath}
+                      onChange={(event) => setRootPath(event.target.value)}
+                      placeholder="选择或输入本地项目目录"
+                    />
+                    <button className="button subtle small-button" onClick={() => void chooseProjectFolder()} disabled={choosingFolder}>
+                      {choosingFolder ? "选择中..." : "选择文件夹"}
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>项目 ID</span>
+                  <input className="input" value={projectId} onChange={(event) => setProjectId(event.target.value)} />
+                </label>
+                <div className="button-row">
+                  <button className="button primary" onClick={() => void scanDocuments()} disabled={loadingDocuments}>
+                    {loadingDocuments ? "扫描中..." : "刷新论文库"}
+                  </button>
+                  <button
+                    className="button subtle"
+                    onClick={() => void batchIngestPendingDocuments()}
+                    disabled={batchIngesting || pendingDocumentCount === 0}
+                  >
+                    {batchIngesting ? "提交中..." : `批量入库 (${pendingDocumentCount})`}
+                  </button>
                 </div>
-                <span className="chip">Default Desk</span>
               </div>
 
-              <label className="field">
-                <span>Project Folder</span>
-                <input
-                  className="input"
-                  value={rootPath}
-                  onChange={(event) => setRootPath(event.target.value)}
-                />
-              </label>
-
-              <label className="field">
-                <span>Project Id</span>
-                <input
-                  className="input"
-                  value={projectId}
-                  onChange={(event) => setProjectId(event.target.value)}
-                />
-              </label>
-
-              <div className="button-row">
-                <button className="button primary" onClick={scanDocuments} disabled={loadingDocuments}>
-                  {loadingDocuments ? "Scanning..." : "Scan Papers"}
-                </button>
-                <button
-                  className="button subtle"
-                  onClick={batchIngestPendingDocuments}
-                  disabled={batchIngesting || pendingDocumentCount === 0}
-                >
-                  {batchIngesting ? "Queueing..." : `Batch Ingest (${pendingDocumentCount})`}
-                </button>
-              </div>
-            </section>
-
-            <section className="panel-section summary-grid">
-              <article className="summary-card">
-                <span className="summary-label">Indexed</span>
-                <strong>{completedDocumentCount}</strong>
-                <p>papers ready for grounded retrieval</p>
-              </article>
-              <article className="summary-card">
-                <span className="summary-label">Pending</span>
-                <strong>{pendingDocumentCount}</strong>
-                <p>papers still waiting for ingestion</p>
-              </article>
-              <article className="summary-card">
-                <span className="summary-label">Running</span>
-                <strong>{activeTaskCount}</strong>
-                <p>jobs currently executing</p>
-              </article>
-            </section>
-
-            <section className="panel-section document-list-section">
-              <div className="section-heading">
-                <div>
-                  <p className="section-kicker">Library</p>
-                  <h2>Paper Queue</h2>
+              <div className="panel-block">
+                <p className="section-kicker">概览</p>
+                <div className="stats-list">
+                  <div className="stat-row">
+                    <span>已入库</span>
+                    <strong>{completedDocumentCount}</strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>待入库</span>
+                    <strong>{pendingDocumentCount}</strong>
+                  </div>
+                  <div className="stat-row">
+                    <span>运行中任务</span>
+                    <strong>{activeTaskCount}</strong>
+                  </div>
                 </div>
-                <span className="chip">{documents.length}</span>
+              </div>
+            </aside>
+
+            <section className="workspace-panel library-main">
+              <div className="workspace-section-header">
+                <div>
+                  <p className="section-kicker">论文库</p>
+                  <h2>论文列表</h2>
+                  <p className="section-copy">双击论文进入阅读器，右键可直接执行入库操作。</p>
+                </div>
+                {documents.length > 0 ? (
+                  <div className="table-meta-row">
+                    <span className="chip">共 {documents.length} 篇</span>
+                    <span className="chip">每页 {documentsPerPage} 篇</span>
+                  </div>
+                ) : null}
               </div>
 
               {documents.length === 0 ? (
-                <div className="empty-state-card">
-                  <strong>No papers loaded</strong>
-                  <p>Scan your project folder to populate the reading desk.</p>
+                <div className="empty-state-card large">
+                  <strong>还没有加载任何论文</strong>
+                  <p>选择项目目录后点击“刷新论文库”，界面会自动把数据库里已有的入库状态同步回来。</p>
                 </div>
               ) : (
-                <div className="document-list">
-                  {documents.map((document) => {
-                    const task = getTaskForDocument(document, taskByPath);
-                    const state = renderTaskState(document, taskByPath);
-                    const active = selectedDocument?.id === document.id;
-                    return (
-                      <article
-                        key={document.id}
-                        className={`document-row ${active ? "is-selected" : ""}`}
-                        onClick={() => focusDocument(document)}
-                        onDoubleClick={() => openReader(document)}
-                        onContextMenu={(event) => openContextMenu(event, document)}
-                      >
-                        <div className="document-row-header">
-                          <div>
-                            <strong>{document.title}</strong>
-                            <p>{document.file_name}</p>
-                          </div>
-                          <StatusBadge state={state} />
-                        </div>
-                        <p className="document-meta">{formatDate(document.modified_at)}</p>
-                        <p className="document-path">{document.path}</p>
-                        <div className="document-inline-actions">
-                          <button
-                            className="mini-action"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openReader(document);
-                            }}
+                <div className="document-table-shell">
+                  <table className="document-table">
+                    <thead>
+                      <tr>
+                        <th>论文</th>
+                        <th>状态</th>
+                        <th>更新时间</th>
+                        <th>路径</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paginatedDocuments.map((document) => {
+                        const task = taskByPath[document.path];
+                        const state = renderTaskState(document, taskByPath);
+                        return (
+                          <tr
+                            key={document.id}
+                            className={selectedDocument?.id === document.id ? "selected" : ""}
+                            onClick={() => setSelectedDocument(document)}
+                            onDoubleClick={() => openReader(document)}
+                            onContextMenu={(event) => openContextMenu(event, document)}
                           >
-                            Open
-                          </button>
-                          <button
-                            className="mini-action"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void loadDocumentImages(document);
-                            }}
-                          >
-                            Gallery
-                          </button>
-                          <button
-                            className="mini-action"
-                            disabled={isTaskActive(task) || ingestingDocumentId === document.id}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void queueIngestion(document);
-                            }}
-                          >
-                            {document.ingested ? "Re-ingest" : task?.state === "failed" ? "Retry" : "Ingest"}
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
+                            <td>
+                              <div className="document-cell">
+                                <strong>{document.title}</strong>
+                                <span>{document.file_name}</span>
+                              </div>
+                            </td>
+                            <td>
+                              <StatusBadge state={state} />
+                            </td>
+                            <td>{formatDate(document.modified_at)}</td>
+                            <td className="path-cell">{document.path}</td>
+                            <td>
+                              <div className="document-action-row">
+                                <button className="mini-action" onClick={(event) => {
+                                  event.stopPropagation();
+                                  openReader(document);
+                                }}>
+                                  阅读
+                                </button>
+                                <button
+                                  className="mini-action"
+                                  disabled={isTaskActive(task) || ingestingDocumentId === document.id}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void queueIngestion(document);
+                                  }}
+                                >
+                                  {document.ingested ? "重入库" : task?.state === "failed" ? "重试入库" : "入库"}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
+
+              {documents.length > documentsPerPage ? (
+                <div className="pagination-row">
+                  <span className="pagination-summary">
+                    第 {currentDocumentPage} / {totalDocumentPages} 页
+                  </span>
+                  <div className="button-row">
+                    <button
+                      className="button subtle small-button"
+                      onClick={() => setCurrentDocumentPage((page) => Math.max(1, page - 1))}
+                      disabled={currentDocumentPage === 1}
+                    >
+                      上一页
+                    </button>
+                    <button
+                      className="button subtle small-button"
+                      onClick={() => setCurrentDocumentPage((page) => Math.min(totalDocumentPages, page + 1))}
+                      disabled={currentDocumentPage === totalDocumentPages}
+                    >
+                      下一页
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
             </section>
-          </aside>
-
-          <section className="workspace-panel desk-main">
-            {paperView === "reader" && selectedDocument ? (
-              <section className="reader-panel">
-                <div className="workspace-toolbar">
-                  <div>
-                    <p className="section-kicker">Reader</p>
-                    <h2>{selectedDocument.title}</h2>
-                    <p className="toolbar-copy">{selectedDocument.path}</p>
-                  </div>
-                  <div className="button-row">
-                    <button className="button subtle" onClick={backToLibrary}>
-                      Back to Library
-                    </button>
-                    <button
-                      className="button subtle"
-                      onClick={() => void loadDocumentImages(selectedDocument)}
-                    >
-                      Figure Gallery
-                    </button>
-                  </div>
-                </div>
-
-                <div className="reader-frame">
-                  {selectedPdfUrl ? (
-                    <iframe src={selectedPdfUrl} className="pdf-viewer" title="PDF Viewer" />
-                  ) : (
-                    <div className="empty-state-card">
-                      <strong>No active reader</strong>
-                      <p>Select a paper from the library to open the reader.</p>
-                    </div>
-                  )}
-                </div>
-              </section>
-            ) : (
-              <section className="desk-overview">
-                <div className="workspace-toolbar">
-                  <div>
-                    <p className="section-kicker">Paper Workspace</p>
-                    <h2>Research Desk</h2>
-                    <p className="toolbar-copy">
-                      Keep the paper list, reading surface, and grounded assistant aligned around the
-                      current document.
-                    </p>
-                  </div>
-                  <div className="button-row">
-                    <button
-                      className="button primary"
-                      onClick={() => selectedDocument && openReader(selectedDocument)}
-                      disabled={!selectedDocument}
-                    >
-                      Open Reader
-                    </button>
-                    <button
-                      className="button subtle"
-                      onClick={() => selectedDocument && void loadDocumentImages(selectedDocument)}
-                      disabled={!selectedDocument}
-                    >
-                      Figure Gallery
-                    </button>
-                    <button
-                      className="button subtle"
-                      onClick={() => selectedDocument && void queueIngestion(selectedDocument)}
-                      disabled={!selectedDocument || isTaskActive(currentTask) || ingestingDocumentId === selectedDocument?.id}
-                    >
-                      {selectedDocument?.ingested
-                        ? "Re-ingest Paper"
-                        : currentTask?.state === "failed"
-                          ? "Retry Ingest"
-                          : "Ingest Paper"}
-                    </button>
-                  </div>
-                </div>
-
-                {selectedDocument ? (
-                  <div className="selected-paper-card">
-                    <div className="selected-paper-header">
-                      <div>
-                        <p className="section-kicker">Selected Paper</p>
-                        <h3>{selectedDocument.title}</h3>
-                      </div>
-                      <StatusBadge state={selectedDocumentState} />
-                    </div>
-                    <div className="info-grid">
-                      <article className="info-card">
-                        <span className="info-label">Source File</span>
-                        <strong>{selectedDocument.file_name}</strong>
-                        <p>{selectedDocument.path}</p>
-                      </article>
-                      <article className="info-card">
-                        <span className="info-label">Last Modified</span>
-                        <strong>{formatDate(selectedDocument.modified_at)}</strong>
-                        <p>{selectedDocument.ingested ? "Indexed for retrieval" : "Waiting to be indexed"}</p>
-                      </article>
-                      <article className="info-card">
-                        <span className="info-label">Next Step</span>
-                        <strong>{paperView === "reader" ? "Continue reading" : "Open and annotate"}</strong>
-                        <p>Use the actions above to read, inspect figures, or queue ingestion.</p>
-                      </article>
-                    </div>
-                    <div className="desk-preview-card">
-                      <strong>Why this layout</strong>
-                      <p>
-                        Visible actions replace the old right-click-only flow, while the current paper
-                        stays pinned as the center of the workspace.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="empty-state-card">
-                    <strong>No paper selected</strong>
-                    <p>Scan papers and select one from the left column to start reading or asking the assistant.</p>
-                  </div>
-                )}
-              </section>
-            )}
           </section>
-
-          <aside className="workspace-panel desk-context">
-            <div className="desk-context-stack">
-              <section className="panel-section context-card">
-                <div className="section-heading">
-                  <div>
-                    <p className="section-kicker">Current Scope</p>
-                    <h2>Paper Context</h2>
-                  </div>
-                  <StatusBadge state={selectedDocumentState} />
-                </div>
-                {selectedDocument ? (
-                  <>
-                    <p className="context-title">{selectedDocument.title}</p>
-                    <p className="context-copy">{selectedDocument.path}</p>
-                    <p className="context-copy">
-                      AI replies in this workspace should be understood as grounded in the selected paper
-                      when available.
-                    </p>
-                  </>
-                ) : (
-                  <p className="context-copy">
-                    Select a paper to pin reading context for notes, citations, and grounded assistant answers.
-                  </p>
-                )}
-              </section>
-
-              <section className="panel-section memo-panel">
-                <div className="section-heading">
-                  <div>
-                    <p className="section-kicker">Reading Notes</p>
-                    <h2>Paper Memo</h2>
-                  </div>
-                  <span className="chip">Quick Recall</span>
-                </div>
+        ) : (
+          <section className="reader-layout">
+            <aside className="workspace-panel reader-note-panel">
+              <div className="panel-block reader-note-block">
+                <p className="section-kicker">论文笔记</p>
+                <h2>论文笔记</h2>
                 <textarea
                   className="input textarea note-textarea"
-                  rows={10}
+                  rows={18}
                   value={selectedNote}
                   onChange={(event) => updateSelectedNote(event.target.value)}
-                  placeholder="Capture the contribution, methodology, surprises, or reproduction notes for this paper."
-                  disabled={!selectedDocument}
+                  placeholder="记录论文贡献、问题、复现思路、实验疑点和后续待办"
                 />
-              </section>
+              </div>
+            </aside>
 
-              <section className="panel-section assistant-panel">
-                <div className="section-heading">
-                  <div>
-                    <p className="section-kicker">Grounded Assistant</p>
-                    <h2>Paper Copilot</h2>
-                  </div>
-                  <span className="chip">Shared AI</span>
+            <section className="workspace-panel reader-main-panel">
+              <div className="workspace-section-header">
+                <div>
+                  <p className="section-kicker">阅读器</p>
+                  <h2>{selectedDocument?.title || "论文阅读"}</h2>
+                  <p className="section-copy">{selectedDocument?.path || "请选择一篇论文进入阅读。"}</p>
                 </div>
-                <PaperLabChatPanel
-                  projectId={projectId}
-                  title="Paper Workspace Assistant"
-                  description="Same AI capability as the console workspace, but scoped around the active paper and reading session."
-                  placeholder="Ask for explanations, method breakdowns, figure interpretation, or reproduction hints..."
-                  contextLabel={
-                    selectedDocument
-                      ? `Active paper: ${selectedDocument.title}`
-                      : "Scope: library without pinned paper"
-                  }
-                  compact
-                />
-              </section>
-
-              <section className="panel-section task-section">
-                <div className="section-heading">
-                  <div>
-                    <p className="section-kicker">Ingestion Monitoring</p>
-                    <h2>Task History</h2>
-                  </div>
-                  <span className="chip">{filteredTasks.length}</span>
-                </div>
-                <div className="task-filter-row">
-                  {(["all", "active", "failed", "completed"] as const).map((filter) => (
-                    <button
-                      key={filter}
-                      className={`task-filter-button ${taskFilter === filter ? "active" : ""}`}
-                      onClick={() => setTaskFilter(filter)}
-                    >
-                      {capitalize(filter)}
+                <div className="button-row">
+                  <button className="button subtle" onClick={closeReader}>
+                    返回论文库
+                  </button>
+                  {selectedDocument ? (
+                    <button className="button subtle" onClick={() => void loadDocumentImages(selectedDocument)}>
+                      图像画廊
                     </button>
-                  ))}
+                  ) : null}
                 </div>
-                {filteredTasks.length === 0 ? (
-                  <div className="empty-state-card compact">
-                    <strong>No ingestion tasks yet</strong>
-                    <p>Queue a paper to see recent ingestion activity here.</p>
-                  </div>
+              </div>
+
+              <div className="reader-frame">
+                {selectedPdfUrl ? (
+                  <iframe src={selectedPdfUrl} className="pdf-viewer" title="论文预览" />
                 ) : (
-                  <div className="task-list">
-                    {filteredTasks.map((task) => (
-                      <article className="task-card" key={task.task_id}>
-                        <div className="task-head">
-                          <strong>{task.result?.status || task.state}</strong>
-                          <StatusBadge state={task.state} />
-                        </div>
-                        <p className="task-path">{task.path}</p>
-                        <p className="task-meta">
-                          {task.result?.message || task.error_message || "Waiting for execution."}
-                        </p>
-                        <p className="task-meta">Created: {formatDate(task.created_at)}</p>
-                        {task.started_at ? (
-                          <p className="task-meta">Started: {formatDate(task.started_at)}</p>
-                        ) : null}
-                        {task.finished_at ? (
-                          <p className="task-meta">Finished: {formatDate(task.finished_at)}</p>
-                        ) : null}
-                        {task.error_code ? (
-                          <p className="task-meta">
-                            {task.error_code}
-                            {task.retryable ? " · retryable" : ""}
-                            {task.timed_out ? " · timed out" : ""}
-                          </p>
-                        ) : null}
-                        {task.state === "failed" && task.retryable ? (
-                          <button className="button subtle task-retry-button" onClick={() => void retryTask(task)}>
-                            Retry Task
-                          </button>
-                        ) : null}
-                      </article>
-                    ))}
+                  <div className="empty-state-card large">
+                    <strong>当前没有打开论文</strong>
+                    <p>回到论文库后双击论文，即可进入阅读状态。</p>
                   </div>
                 )}
-              </section>
-            </div>
-          </aside>
-        </section>
-      ) : (
-        <section
-          className="ai-workspace"
-          id="ai-workspace-panel"
-          role="tabpanel"
-          aria-labelledby="ai-workspace-tab"
-        >
-          <aside className="workspace-panel ai-sidebar">
-            <section className="panel-section">
-              <div className="section-heading">
-                <div>
-                  <p className="section-kicker">Workspace Scope</p>
-                  <h2>Project Lens</h2>
-                </div>
-                <span className="chip">Same AI</span>
-              </div>
-              <div className="info-grid single-column">
-                <article className="info-card">
-                  <span className="info-label">Project Id</span>
-                  <strong>{projectId}</strong>
-                  <p>Shared assistant runtime and retrieval scope</p>
-                </article>
-                <article className="info-card">
-                  <span className="info-label">Pinned Paper</span>
-                  <strong>{selectedDocument?.title || "None selected"}</strong>
-                  <p>Return to Paper Workspace when you need side-by-side reading.</p>
-                </article>
-                <article className="info-card">
-                  <span className="info-label">Use Case</span>
-                  <strong>Analysis and reproduction planning</strong>
-                  <p>Best for cross-paper reasoning, open-ended planning, and longer task breakdowns.</p>
-                </article>
               </div>
             </section>
-          </aside>
 
-          <section className="workspace-panel ai-main">
-            <div className="workspace-toolbar">
+            <aside className="workspace-panel reader-chat-panel">
+              <div className="panel-block reader-chat-block">
+                <PaperLabChatPanel
+                  projectId={projectId}
+                  title="论文助手"
+                  description="针对当前论文提问、解释方法、梳理实验结论或规划复现。"
+                  placeholder="输入你想让 AI 解释或分析的问题"
+                  contextLabel={selectedDocument ? `当前论文：${selectedDocument.title}` : ""}
+                />
+              </div>
+            </aside>
+          </section>
+        )
+      ) : (
+        <section className="ai-workspace-layout">
+          <div className="workspace-panel ai-workspace-panel">
+            <div className="workspace-section-header">
               <div>
-                <p className="section-kicker">AI Workspace</p>
-                <h2>AI Research Console</h2>
-                <p className="toolbar-copy">
-                  The same assistant capability, now in a conversation-first layout without the PDF
-                  reader.
-                </p>
+                <p className="section-kicker">AI 工作区</p>
+                <h2>AI 对话</h2>
+                <p className="section-copy">左侧按项目和历史对话组织，右侧专注当前对话内容。</p>
               </div>
-              <div className="button-row">
-                <button className="button subtle" onClick={() => setWorkspace("paper")}>
-                  Return to Paper Workspace
-                </button>
-                {selectedDocument ? (
-                  <button className="button primary" onClick={() => openReader(selectedDocument)}>
-                    Open Selected Paper
-                  </button>
-                ) : null}
-              </div>
+              <button className="button subtle" onClick={() => setShowAiProjectEditor((current) => !current)}>
+                {showAiProjectEditor ? "收起项目设置" : "调整项目"}
+              </button>
             </div>
+
+            {showAiProjectEditor ? (
+              <div className="ai-project-editor">
+                <label className="field">
+                  <span>项目目录</span>
+                  <div className="folder-input-row">
+                    <input className="input" value={rootPath} onChange={(event) => setRootPath(event.target.value)} />
+                    <button className="button subtle small-button" onClick={() => void chooseProjectFolder()} disabled={choosingFolder}>
+                      {choosingFolder ? "选择中..." : "选择文件夹"}
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>项目 ID</span>
+                  <input className="input" value={projectId} onChange={(event) => setProjectId(event.target.value)} />
+                </label>
+                <button className="button primary small-button" onClick={() => void scanDocuments()} disabled={loadingDocuments}>
+                  {loadingDocuments ? "刷新中..." : "刷新论文库"}
+                </button>
+              </div>
+            ) : null}
 
             <PaperLabChatPanel
               projectId={projectId}
-              title="AI Workspace Assistant"
-              description="Use the same grounded assistant for analysis, comparison, reproduction planning, and broader research tasks."
-              placeholder="Ask for synthesis, comparison, implementation planning, or reproduction strategies..."
-              contextLabel={
-                selectedDocument
-                  ? `Pinned context available: ${selectedDocument.title}`
-                  : "Scope: whole project workspace"
-              }
+              title="AI 对话"
+              description="解释论文、比较方法、规划复现步骤，都在同一个流式对话面板里完成。"
+              placeholder="输入问题，或要求 AI 帮你做分析与复现规划"
+              contextLabel={selectedDocument ? `当前选中论文：${selectedDocument.title}` : "当前未锁定具体论文"}
+              showThreadSidebar
             />
-          </section>
-
-          <aside className="workspace-panel ai-context">
-            <div className="ai-context-stack">
-              <section className="panel-section">
-                <div className="section-heading">
-                  <div>
-                    <p className="section-kicker">Execution Context</p>
-                    <h2>Research Notes</h2>
-                  </div>
-                  <span className="chip">Console Sidecar</span>
-                </div>
-                <div className="info-grid single-column">
-                  <article className="info-card">
-                    <span className="info-label">Recommended Uses</span>
-                    <strong>Explain, compare, reproduce</strong>
-                    <p>Use this workspace when the conversation should stay central and the PDF should not dominate the layout.</p>
-                  </article>
-                  <article className="info-card">
-                    <span className="info-label">Evidence Flow</span>
-                    <strong>Shared with Paper Workspace</strong>
-                    <p>Citations, evidence counts, and project scope still come from the same assistant runtime.</p>
-                  </article>
-                  <article className="info-card">
-                    <span className="info-label">Hand-off</span>
-                    <strong>Reader remains one click away</strong>
-                    <p>When the assistant points to a specific paper, move back to the Paper Workspace to read and annotate in place.</p>
-                  </article>
-                </div>
-              </section>
-            </div>
-          </aside>
+          </div>
         </section>
       )}
 
       {contextMenu.visible && contextMenu.document ? (
-        <div
-          className="context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onClick={(event) => event.stopPropagation()}
-        >
+        <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
           <button className="context-menu-item" onClick={() => openReader(contextMenu.document!)}>
-            Open Reader
+            打开阅读器
           </button>
-          <button className="context-menu-item" onClick={() => void loadDocumentImages(contextMenu.document!)}>
-            Open Figure Gallery
-          </button>
-          <button
-            className="context-menu-item"
-            onClick={() => void queueIngestion(contextMenu.document!)}
-            disabled={
-              ingestingDocumentId === contextMenu.document.id ||
-              isTaskActive(getTaskForDocument(contextMenu.document, taskByPath))
-            }
-          >
-            {ingestingDocumentId === contextMenu.document.id
-              ? "Queueing..."
-              : getDocumentActionLabel(contextMenu.document, taskByPath)}
+          <button className="context-menu-item" onClick={() => void queueIngestion(contextMenu.document!)}>
+            {getDocumentActionLabel(contextMenu.document, taskByPath)}
           </button>
         </div>
       ) : null}
@@ -1011,20 +790,20 @@ function App() {
           <section className="modal-panel" onClick={(event) => event.stopPropagation()}>
             <header className="modal-header">
               <div>
-                <p className="section-kicker">Figure Gallery</p>
-                <h2>{galleryDocument?.title || "Figure Gallery"}</h2>
-                <p className="toolbar-copy">{galleryDocument?.path}</p>
+                <p className="section-kicker">图像画廊</p>
+                <h2>{galleryDocument?.title || "图像画廊"}</h2>
+                <p className="section-copy">{galleryDocument?.path}</p>
               </div>
               <button className="button subtle" onClick={closeGallery}>
-                Close
+                关闭
               </button>
             </header>
 
-            {loadingImages ? <p className="loading-copy">Loading extracted visual assets...</p> : null}
+            {loadingImages ? <p className="loading-copy">正在加载论文图片...</p> : null}
             {!loadingImages && documentImages.length === 0 ? (
-              <div className="empty-state-card">
-                <strong>No extracted figures</strong>
-                <p>No body figures were extracted from this paper.</p>
+              <div className="empty-state-card large">
+                <strong>没有提取到图片</strong>
+                <p>当前论文没有可展示的图像资源。</p>
               </div>
             ) : null}
 
@@ -1032,19 +811,14 @@ function App() {
               {documentImages.map((image) => (
                 <article className="gallery-card" key={image.id}>
                   {image.preview_url ? (
-                    <img
-                      className="gallery-image"
-                      src={image.preview_url}
-                      alt={image.asset_label || image.file_name}
-                      loading="lazy"
-                    />
+                    <img className="gallery-image" src={image.preview_url} alt={image.asset_label || image.file_name} loading="lazy" />
                   ) : (
-                    <div className="gallery-image empty-image">Preview unavailable</div>
+                    <div className="gallery-image empty-image">预览不可用</div>
                   )}
                   <div className="gallery-copy">
-                    <strong>{image.figure_label || image.asset_label || `Page ${image.page_number}`}</strong>
-                    <p>{image.summary || image.caption || "No extracted summary."}</p>
-                    <small>{image.caption || `${image.asset_type} · page ${image.page_number}`}</small>
+                    <strong>{image.figure_label || image.asset_label || `第 ${image.page_number} 页`}</strong>
+                    <p>{image.summary || image.caption || "没有图片摘要"}</p>
+                    <small>{image.caption || `${image.asset_type} · 第 ${image.page_number} 页`}</small>
                   </div>
                 </article>
               ))}
@@ -1056,68 +830,115 @@ function App() {
   );
 }
 
-function StatusBadge({ state }: { state: string }) {
-  return <span className={`status-badge state-${state.toLowerCase()}`}>{humanizeState(state)}</span>;
+function loadDesktopPreferences(): DesktopPreferences {
+  if (typeof window === "undefined") {
+    return defaultPreferences;
+  }
+
+  const raw = window.localStorage.getItem(desktopPreferencesKey);
+  if (!raw) {
+    return defaultPreferences;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<DesktopPreferences>;
+    return {
+      rootPath: typeof parsed.rootPath === "string" ? parsed.rootPath : defaultPreferences.rootPath,
+      projectId: typeof parsed.projectId === "string" && parsed.projectId ? parsed.projectId : defaultPreferences.projectId,
+    };
+  } catch {
+    return defaultPreferences;
+  }
 }
 
-function renderTaskState(
-  document: ScannedDocument,
-  taskByPath: Record<string, IngestionTaskSummary>,
-) {
+function saveDesktopPreferences(preferences: DesktopPreferences) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(desktopPreferencesKey, JSON.stringify(preferences));
+}
+
+function StatusBadge({ state }: { state: string }) {
+  return <span className={`status-badge state-${state.toLowerCase().replace(/\s+/g, "-")}`}>{humanizeState(state)}</span>;
+}
+
+function renderTaskState(document: ScannedDocument, taskByPath: Record<string, IngestionTaskSummary>) {
   const task = taskByPath[document.path];
   if (!task) {
-    return document.ingested ? "Indexed" : "Pending";
+    return document.ingested ? "indexed" : "pending";
   }
   return task.state;
-}
-
-function getTaskForDocument(
-  document: ScannedDocument,
-  taskByPath: Record<string, IngestionTaskSummary>,
-) {
-  return taskByPath[document.path];
-}
-
-function isTaskActive(task?: IngestionTaskSummary | null) {
-  return task?.state === "queued" || task?.state === "running";
 }
 
 function getDocumentActionLabel(
   document: ScannedDocument,
   taskByPath: Record<string, IngestionTaskSummary>,
 ) {
-  const task = getTaskForDocument(document, taskByPath);
+  const task = taskByPath[document.path];
   if (document.ingested) {
-    return "Re-ingest Paper";
+    return "重新入库";
   }
   if (task?.state === "failed") {
-    return "Retry Ingest";
+    return "重试入库";
   }
   if (isTaskActive(task)) {
-    return "Ingesting...";
+    return "正在入库";
   }
-  return "Ingest Paper";
+  return "入库";
+}
+
+function isTaskActive(task?: IngestionTaskSummary | null) {
+  return task?.state === "queued" || task?.state === "running";
 }
 
 function formatDate(value?: string | null) {
   if (!value) {
-    return "Unknown";
+    return "未知";
   }
-
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-
-  return date.toLocaleString();
-}
-
-function capitalize(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
+  return date.toLocaleString("zh-CN");
 }
 
 function humanizeState(value: string) {
-  return value.replace(/_/g, " ");
+  switch (value) {
+    case "indexed":
+      return "已入库";
+    case "pending":
+      return "待入库";
+    case "queued":
+      return "排队中";
+    case "running":
+      return "进行中";
+    case "failed":
+      return "失败";
+    case "completed":
+      return "完成";
+    default:
+      return value;
+  }
+}
+
+async function toApiErrorMessage(response: Response, context: "select-project-folder") {
+  const raw = await response.text();
+  let detail = raw;
+
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail) {
+      detail = parsed.detail;
+    }
+  } catch {
+    // Keep raw response body when it is not JSON.
+  }
+
+  if (context === "select-project-folder" && response.status === 404) {
+    return "项目目录选择接口不可用，请重启后端到最新版本后重试。";
+  }
+
+  return detail || "请求失败";
 }
 
 export default App;

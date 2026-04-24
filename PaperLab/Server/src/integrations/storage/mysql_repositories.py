@@ -436,6 +436,8 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
             keywords_json JSON NOT NULL,
             related_chunk_ids_json JSON NOT NULL,
             media_type VARCHAR(64) NULL,
+            byte_size INT NOT NULL DEFAULT 0,
+            content_blob LONGBLOB NULL,
             metadata_json JSON NOT NULL,
             INDEX idx_document_assets_document_id (document_id),
             INDEX idx_document_assets_label (asset_label)
@@ -444,6 +446,16 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(sql)
+                self._ensure_column(
+                    cursor,
+                    column_name="byte_size",
+                    definition="ADD COLUMN byte_size INT NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    cursor,
+                    column_name="content_blob",
+                    definition="ADD COLUMN content_blob LONGBLOB NULL",
+                )
 
     def replace_for_document(self, document_id: str, assets: list[DocumentAsset]) -> None:
         """Replace all visual assets linked to one document.
@@ -461,9 +473,9 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
         INSERT INTO document_assets (
             id, document_id, page_number, file_path, file_name, asset_kind, asset_label,
             asset_index, caption, summary, asset_type, keywords_json,
-            related_chunk_ids_json, media_type, metadata_json
+            related_chunk_ids_json, media_type, byte_size, content_blob, metadata_json
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -488,6 +500,8 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
                             self._dump_json(asset.keywords),
                             self._dump_json(asset.related_chunk_ids),
                             asset.media_type,
+                            asset.byte_size,
+                            asset.content_bytes,
                             self._dump_json(asset.metadata),
                         )
                         for asset in assets
@@ -508,7 +522,7 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
         SELECT
             id, document_id, page_number, file_path, file_name, asset_kind, asset_label,
             asset_index, caption, summary, asset_type, keywords_json,
-            related_chunk_ids_json, media_type, metadata_json
+            related_chunk_ids_json, media_type, byte_size, metadata_json
         FROM document_assets
         WHERE document_id = %s
         ORDER BY page_number ASC, asset_index ASC, file_name ASC
@@ -530,7 +544,7 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
         SELECT
             id, document_id, page_number, file_path, file_name, asset_kind, asset_label,
             asset_index, caption, summary, asset_type, keywords_json,
-            related_chunk_ids_json, media_type, metadata_json
+            related_chunk_ids_json, media_type, byte_size, metadata_json
         FROM document_assets
         WHERE id IN ({placeholders})
         """
@@ -551,6 +565,45 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(sql, (document_id,))
+
+    def load_content(self, asset_id: str) -> tuple[str | None, bytes] | None:
+        """Load one asset binary payload from MySQL."""
+
+        sql = """
+        SELECT media_type, content_blob
+        FROM document_assets
+        WHERE id = %s
+        LIMIT 1
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, (asset_id,))
+                row = cursor.fetchone()
+        if row is None or row["content_blob"] is None:
+            return None
+        payload = row["content_blob"]
+        if isinstance(payload, memoryview):
+            payload = payload.tobytes()
+        if isinstance(payload, bytearray):
+            payload = bytes(payload)
+        return row["media_type"], payload
+
+    def _ensure_column(self, cursor: Any, *, column_name: str, definition: str) -> None:
+        """Add one missing column to `document_assets` during startup migration."""
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS column_count
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = 'document_assets'
+              AND column_name = %s
+            """,
+            (self.config.database, column_name),
+        )
+        row = cursor.fetchone()
+        if row is not None and int(row["column_count"]) == 0:
+            cursor.execute(f"ALTER TABLE document_assets {definition}")
 
     def _row_to_asset(self, row: dict[str, Any]) -> DocumentAsset:
         """Convert one MySQL row into a `DocumentAsset`.
@@ -577,6 +630,7 @@ class MySQLDocumentAssetRepository(MySQLRepositoryBase):
             keywords=self._load_json(row["keywords_json"], []),
             related_chunk_ids=self._load_json(row["related_chunk_ids_json"], []),
             media_type=row["media_type"],
+            byte_size=int(row.get("byte_size") or 0),
             metadata=self._load_json(row["metadata_json"], {}),
         )
 
@@ -756,8 +810,8 @@ class MySQLChunkRepository(MySQLRepositoryBase):
 if __name__ == "__main__":
     from uuid import uuid4
 
-    root_env_path = Path(__file__).resolve().parents[4] / ".env"
-    load_dotenv(root_env_path)
+    server_env_path = Path(__file__).resolve().parents[3] / ".env"
+    load_dotenv(server_env_path)
 
     mysql_config = MySQLConnectionConfig(
         host=os.getenv("PAPERLAB_MYSQL_HOST", "127.0.0.1"),
@@ -803,7 +857,7 @@ if __name__ == "__main__":
         id=test_asset_id,
         document_id=test_document_id,
         page_number=1,
-        file_path=str(Path.cwd() / "PaperLabCache" / "sample.png"),
+        file_path="",
         file_name="sample.png",
         asset_kind="figure",
         asset_label="Figure 1",
@@ -814,6 +868,8 @@ if __name__ == "__main__":
         keywords=["sample", "figure", "test"],
         related_chunk_ids=[test_chunk_id],
         media_type="image/png",
+        byte_size=16,
+        content_bytes=b"fake-image-bytes",
         metadata={"project_id": test_project_id, "source": "integration_test"},
     )
     test_chunk = Chunk(

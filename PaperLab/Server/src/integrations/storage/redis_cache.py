@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from hashlib import sha1
 import json
@@ -68,13 +69,13 @@ class RedisCacheStore:
         self.client.delete(key)
 
     def thread_lock_key(self, thread_id: str) -> str:
-        return f"studyagent:lock:thread:{thread_id}"
+        return f"paperlab:lock:thread:{thread_id}"
 
     def save_thread_context(self, thread_id: str, payload: dict[str, Any], ttl_seconds: int = 21600) -> None:
-        self.set_json(f"studyagent:thread:{thread_id}:context", payload, ttl_seconds)
+        self.set_json(f"paperlab:thread:{thread_id}:context", payload, ttl_seconds)
 
     def load_thread_context(self, thread_id: str) -> dict[str, Any] | None:
-        return self.get_json(f"studyagent:thread:{thread_id}:context")
+        return self.get_json(f"paperlab:thread:{thread_id}:context")
 
     def save_cached_retrieval(self, project_id: str, query: str, payload: dict[str, Any], ttl_seconds: int = 3600) -> None:
         self.set_json(self._retrieval_key(project_id, query), payload, ttl_seconds)
@@ -94,17 +95,48 @@ class RedisCacheStore:
     def load_cached_url_fetch(self, url: str) -> dict[str, Any] | None:
         return self.get_json(self._url_fetch_key(url))
 
+    def save_cached_asset_content(
+        self,
+        asset_id: str,
+        *,
+        media_type: str | None,
+        content: bytes,
+        ttl_seconds: int = 1800,
+    ) -> None:
+        self.set_json(
+            self._asset_content_key(asset_id),
+            {
+                "media_type": media_type or "application/octet-stream",
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+            ttl_seconds,
+        )
+
+    def load_cached_asset_content(self, asset_id: str) -> tuple[str, bytes] | None:
+        payload = self.get_json(self._asset_content_key(asset_id))
+        if payload is None:
+            return None
+        encoded = payload.get("content_base64")
+        if not isinstance(encoded, str) or not encoded:
+            return None
+        media_type = str(payload.get("media_type") or "application/octet-stream")
+        return media_type, base64.b64decode(encoded)
+
     @staticmethod
     def _retrieval_key(project_id: str, query: str) -> str:
-        return f"studyagent:cache:retrieval:{project_id}:{_digest(query)}"
+        return f"paperlab:cache:retrieval:{project_id}:{_digest(query)}"
 
     @staticmethod
     def _web_search_key(query: str) -> str:
-        return f"studyagent:cache:web_search:{_digest(query)}"
+        return f"paperlab:cache:web_search:{_digest(query)}"
 
     @staticmethod
     def _url_fetch_key(url: str) -> str:
-        return f"studyagent:cache:url_fetch:{_digest(url)}"
+        return f"paperlab:cache:url_fetch:{_digest(url)}"
+
+    @staticmethod
+    def _asset_content_key(asset_id: str) -> str:
+        return f"paperlab:cache:asset:{asset_id}"
 
 
 def _digest(value: str) -> str:

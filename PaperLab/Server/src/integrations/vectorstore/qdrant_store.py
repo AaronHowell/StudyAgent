@@ -702,8 +702,8 @@ if __name__ == "__main__":
     from urllib.parse import urlparse
     from uuid import uuid4
 
-    root_env_path = Path(__file__).resolve().parents[4] / ".env"
-    load_dotenv(root_env_path)
+    server_env_path = Path(__file__).resolve().parents[3] / ".env"
+    load_dotenv(server_env_path)
 
     qdrant_url = os.getenv("PAPERLAB_QDRANT_URL", "http://127.0.0.1:6333")
     parsed_url = urlparse(qdrant_url)

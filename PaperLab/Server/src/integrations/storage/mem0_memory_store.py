@@ -86,13 +86,22 @@ class Mem0MemoryStore:
         ]
 
     def search(self, query: str, project_id: str, limit: int = 5) -> list[MemoryItem]:
-        result = self.client.search(query, user_id=project_id, limit=limit)
+        result = self.client.search(
+            query,
+            top_k=limit,
+            filters={"user_id": project_id},
+        )
         return [self._to_memory_item(project_id, item) for item in _unwrap_result_items(result)]
 
     def summarize_for_project(self, project_id: str) -> str:
         items = [
             self._to_memory_item(project_id, item)
-            for item in _unwrap_result_items(self.client.get_all(user_id=project_id, limit=10))
+            for item in _unwrap_result_items(
+                self.client.get_all(
+                    filters={"user_id": project_id},
+                    top_k=10,
+                )
+            )
         ]
         if not items:
             return ""

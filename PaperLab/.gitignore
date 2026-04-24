@@ -1,10 +1,14 @@
 node_modules/
 dist/
 .env
+Server/.env
 __pycache__/
 *.pyc
 .pytest_cache/
 Server/data/
 Server/*.log
+Server.zip
+Server/.mem0/
+Server/logs/
 Server/.langgraph_api/
 Server/src/*.egg-info/

@@ -1,0 +1,1630 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PaperLab API",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/chat/state": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Get Chat State",
+        "operationId": "get_chat_state_chat_state_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Target project identifier",
+              "title": "Project Id"
+            },
+            "description": "Target project identifier"
+          },
+          {
+            "name": "thread_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Graph thread identifier",
+              "title": "Thread Id"
+            },
+            "description": "Graph thread identifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatStateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat/stream": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Stream Chat Run",
+        "operationId": "stream_chat_run_chat_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Healthz",
+        "description": "Return a minimal health payload for local smoke tests.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/scan": {
+      "post": {
+        "summary": "Scan Documents",
+        "description": "Scan a local folder and return discovered PDF documents.",
+        "operationId": "scan_documents_documents_scan_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanDocumentsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanDocumentsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/images": {
+      "post": {
+        "summary": "Get Document Images",
+        "description": "Extract lightweight image information for one PDF document.",
+        "operationId": "get_document_images_documents_images_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentImagesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentImagesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/ingestion-status": {
+      "post": {
+        "summary": "Get Document Ingestion Status",
+        "description": "Check whether one local document has already been ingested.\n\n作用:\n    根据文档路径构造稳定的文档 id，并查询该文档是否已存在于数据库中。\n\nArgs:\n    payload: 包含本地文档路径的请求体。\n\nReturns:\n    DocumentIngestionStatusResponse: 当前文档的入库状态响应。",
+        "operationId": "get_document_ingestion_status_documents_ingestion_status_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentIngestionStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentIngestionStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/ingest": {
+      "get": {
+        "summary": "List Ingestion Tasks",
+        "description": "Return recent ingestion tasks for the desktop UI.",
+        "operationId": "list_ingestion_tasks_documents_ingest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IngestionTaskSummary"
+                  },
+                  "type": "array",
+                  "title": "Response List Ingestion Tasks Documents Ingest Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Ingest Document",
+        "description": "Queue one local document for background ingestion.\n\n作用:\n    将入库流程放到后台线程池中执行，避免前端请求被长时间阻塞。\n\nArgs:\n    payload: 文档路径和目标项目的请求体。\n\nReturns:\n    IngestDocumentResponse: 新建或复用的任务信息。",
+        "operationId": "ingest_document_documents_ingest_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestDocumentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestDocumentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/ingest/{task_id}": {
+      "get": {
+        "summary": "Get Ingestion Task",
+        "description": "Return current status for one background ingestion task.",
+        "operationId": "get_ingestion_task_documents_ingest__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionTaskSummary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/ingest/batch": {
+      "post": {
+        "summary": "Batch Ingest Documents",
+        "description": "Queue multiple documents for background ingestion.\n\n作用:\n    为文档库页提供批量入库入口，适合同一项目下把多篇论文一起送入后台线程池。",
+        "operationId": "batch_ingest_documents_documents_ingest_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchIngestDocumentsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchIngestDocumentsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/file": {
+      "get": {
+        "summary": "Get Document File",
+        "description": "Serve a local file for PDF preview or image preview.",
+        "operationId": "get_document_file_documents_file_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Absolute path to a local file",
+              "title": "Path"
+            },
+            "description": "Absolute path to a local file"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/assets/{asset_id}/content": {
+      "get": {
+        "summary": "Get Asset Content",
+        "description": "Serve one stored asset binary payload, with Redis as a short-lived cache.",
+        "operationId": "get_asset_content_documents_assets__asset_id__content_get",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/retrieval/evidence": {
+      "post": {
+        "summary": "Retrieve Evidence",
+        "description": "Run document, chunk, and asset retrieval and return one evidence pack.",
+        "operationId": "retrieve_evidence_retrieval_evidence_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetrieveEvidenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalEvidenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/answer/stream": {
+      "post": {
+        "summary": "Stream Agent Answer",
+        "description": "Stream one grounded answer as server-sent events.",
+        "operationId": "stream_agent_answer_agent_answer_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAnswerStreamRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentAnswerStreamRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "title": "Question",
+            "description": "User question for grounded QA"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id",
+            "description": "Target project identifier"
+          },
+          "document_limit": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Document Limit",
+            "default": 5
+          },
+          "chunk_limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Chunk Limit",
+            "default": 8
+          },
+          "asset_limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Asset Limit",
+            "default": 6
+          }
+        },
+        "type": "object",
+        "required": [
+          "question",
+          "project_id"
+        ],
+        "title": "AgentAnswerStreamRequest",
+        "description": "Request payload for one streaming grounded-answer run."
+      },
+      "BatchIngestDocumentsRequest": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id",
+            "description": "Target project identifier"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Paths",
+            "description": "Absolute paths to local documents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "paths"
+        ],
+        "title": "BatchIngestDocumentsRequest",
+        "description": "Request payload for scheduling multiple local documents at once."
+      },
+      "BatchIngestDocumentsResponse": {
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/IngestionTaskSummary"
+            },
+            "type": "array",
+            "title": "Tasks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tasks"
+        ],
+        "title": "BatchIngestDocumentsResponse",
+        "description": "Response payload for one batch ingestion request."
+      },
+      "ChatCommandInput": {
+        "properties": {
+          "update": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatStateUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resume": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "$ref": "#/components/schemas/ChatResumeCommand"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume"
+          }
+        },
+        "type": "object",
+        "title": "ChatCommandInput",
+        "description": "Frontend command payload used for guidance injection and resume."
+      },
+      "ChatInterruptPayload": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "value": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "value"
+        ],
+        "title": "ChatInterruptPayload",
+        "description": "Serializable interrupt record returned to the frontend."
+      },
+      "ChatMessageInput": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "LangChain-compatible message type",
+            "default": "human"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "description": "User-visible message content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "ChatMessageInput",
+        "description": "Frontend message item accepted by the chat bridge."
+      },
+      "ChatMessagePayload": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "content": {
+            "title": "Content"
+          },
+          "additional_kwargs": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Additional Kwargs"
+          },
+          "response_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Response Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "ChatMessagePayload",
+        "description": "Serialized LangChain message returned to the desktop UI."
+      },
+      "ChatResumeCommand": {
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          }
+        },
+        "type": "object",
+        "title": "ChatResumeCommand",
+        "description": "Opaque resume payload passed back into one interrupted graph."
+      },
+      "ChatRunRequest": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id",
+            "description": "Target project identifier"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id",
+            "description": "Persistent graph thread identifier"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input",
+            "description": "Initial graph input, typically {messages: [...]}"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatCommandInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "thread_id"
+        ],
+        "title": "ChatRunRequest",
+        "description": "Request payload for one direct LangGraph-backed chat run."
+      },
+      "ChatStateResponse": {
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessagePayload"
+            },
+            "type": "array",
+            "title": "Messages"
+          },
+          "interrupt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatInterruptPayload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_nodes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Next Nodes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "thread_id",
+          "project_id"
+        ],
+        "title": "ChatStateResponse",
+        "description": "Thread snapshot returned by the FastAPI chat bridge."
+      },
+      "ChatStateUpdate": {
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessageInput"
+            },
+            "type": "array",
+            "title": "Messages"
+          }
+        },
+        "type": "object",
+        "title": "ChatStateUpdate",
+        "description": "State fragment applied before a resume command."
+      },
+      "DocumentImageItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "page_number": {
+            "type": "integer",
+            "title": "Page Number"
+          },
+          "file_name": {
+            "type": "string",
+            "title": "File Name"
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path"
+          },
+          "file_url": {
+            "type": "string",
+            "title": "File Url"
+          },
+          "preview_data_url": {
+            "type": "string",
+            "title": "Preview Data Url",
+            "default": ""
+          },
+          "asset_kind": {
+            "type": "string",
+            "title": "Asset Kind",
+            "default": "visual"
+          },
+          "asset_label": {
+            "type": "string",
+            "title": "Asset Label",
+            "default": ""
+          },
+          "asset_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asset Index"
+          },
+          "figure_label": {
+            "type": "string",
+            "title": "Figure Label"
+          },
+          "figure_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Figure Index"
+          },
+          "caption": {
+            "type": "string",
+            "title": "Caption"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "asset_type": {
+            "type": "string",
+            "title": "Asset Type",
+            "default": "unknown"
+          },
+          "keywords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Keywords"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "document_id",
+          "page_number",
+          "file_name",
+          "file_path",
+          "file_url",
+          "figure_label",
+          "caption",
+          "summary",
+          "keywords"
+        ],
+        "title": "DocumentImageItem",
+        "description": "One extracted image preview item."
+      },
+      "DocumentImagesRequest": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Absolute path to one PDF document"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "DocumentImagesRequest",
+        "description": "Request payload for extracting images from one document."
+      },
+      "DocumentImagesResponse": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentImageItem"
+            },
+            "type": "array",
+            "title": "Images"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "images"
+        ],
+        "title": "DocumentImagesResponse",
+        "description": "Response payload for extracted images of one PDF document."
+      },
+      "DocumentIngestionStatusRequest": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Absolute path to one local document"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "DocumentIngestionStatusRequest",
+        "description": "Request payload for checking whether one document has been ingested."
+      },
+      "DocumentIngestionStatusResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "ingested": {
+            "type": "boolean",
+            "title": "Ingested"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "path",
+          "ingested"
+        ],
+        "title": "DocumentIngestionStatusResponse",
+        "description": "Response payload for one document ingestion-status query."
+      },
+      "DocumentListItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "file_name": {
+            "type": "string",
+            "title": "File Name"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "doc_type": {
+            "type": "string",
+            "title": "Doc Type"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "ingested": {
+            "type": "boolean",
+            "title": "Ingested",
+            "default": false
+          },
+          "modified_at": {
+            "type": "string",
+            "title": "Modified At"
+          },
+          "content_hash": {
+            "type": "string",
+            "title": "Content Hash"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "file_name",
+          "path",
+          "doc_type",
+          "status",
+          "modified_at",
+          "content_hash"
+        ],
+        "title": "DocumentListItem",
+        "description": "One scanned document item returned to the frontend."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Service health status"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service",
+            "description": "Human-readable service name"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment",
+            "description": "Current application environment"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "service",
+          "environment"
+        ],
+        "title": "HealthResponse",
+        "description": "Response payload for the health check endpoint."
+      },
+      "IngestDocumentRequest": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id",
+            "description": "Target project identifier"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Absolute path to one local document"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "path"
+        ],
+        "title": "IngestDocumentRequest",
+        "description": "Request payload for scheduling ingestion of one local document."
+      },
+      "IngestDocumentResponse": {
+        "properties": {
+          "task": {
+            "$ref": "#/components/schemas/IngestionTaskSummary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task"
+        ],
+        "title": "IngestDocumentResponse",
+        "description": "Response payload for one queued ingestion request."
+      },
+      "IngestionTaskSummary": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "error_message": {
+            "type": "string",
+            "title": "Error Message",
+            "default": ""
+          },
+          "error_type": {
+            "type": "string",
+            "title": "Error Type",
+            "default": ""
+          },
+          "error_code": {
+            "type": "string",
+            "title": "Error Code",
+            "default": ""
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "default": false
+          },
+          "timed_out": {
+            "type": "boolean",
+            "title": "Timed Out",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "project_id",
+          "path",
+          "state",
+          "created_at"
+        ],
+        "title": "IngestionTaskSummary",
+        "description": "One ingestion task status item returned to the frontend."
+      },
+      "RetrievalAssetItem": {
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "title": "Asset Id"
+          },
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "page_number": {
+            "type": "integer",
+            "title": "Page Number"
+          },
+          "asset_label": {
+            "type": "string",
+            "title": "Asset Label"
+          },
+          "caption": {
+            "type": "string",
+            "title": "Caption"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "asset_type": {
+            "type": "string",
+            "title": "Asset Type"
+          },
+          "file_name": {
+            "type": "string",
+            "title": "File Name"
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "asset_id",
+          "document_id",
+          "score",
+          "page_number",
+          "asset_label",
+          "caption",
+          "summary",
+          "asset_type",
+          "file_name",
+          "file_path"
+        ],
+        "title": "RetrievalAssetItem",
+        "description": "One scored visual-asset hit returned by the retrieval endpoint."
+      },
+      "RetrievalChunkItem": {
+        "properties": {
+          "chunk_id": {
+            "type": "string",
+            "title": "Chunk Id"
+          },
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "chunk_index": {
+            "type": "integer",
+            "title": "Chunk Index"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chunk_id",
+          "document_id",
+          "score",
+          "chunk_index",
+          "text"
+        ],
+        "title": "RetrievalChunkItem",
+        "description": "One scored chunk hit returned by the retrieval endpoint."
+      },
+      "RetrievalCitationItem": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "document_title": {
+            "type": "string",
+            "title": "Document Title"
+          },
+          "chunk_id": {
+            "type": "string",
+            "title": "Chunk Id"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "locator": {
+            "type": "string",
+            "title": "Locator",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "document_title",
+          "chunk_id"
+        ],
+        "title": "RetrievalCitationItem",
+        "description": "One citation emitted from retrieved chunk evidence."
+      },
+      "RetrievalDocumentItem": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "file_name": {
+            "type": "string",
+            "title": "File Name"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "score",
+          "title",
+          "file_name",
+          "path",
+          "status"
+        ],
+        "title": "RetrievalDocumentItem",
+        "description": "One scored document hit returned by the retrieval endpoint."
+      },
+      "RetrievalEvidenceResponse": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalDocumentItem"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
+          "text_chunks": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalChunkItem"
+            },
+            "type": "array",
+            "title": "Text Chunks"
+          },
+          "assets": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalAssetItem"
+            },
+            "type": "array",
+            "title": "Assets"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalCitationItem"
+            },
+            "type": "array",
+            "title": "Citations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "documents",
+          "text_chunks",
+          "assets",
+          "citations"
+        ],
+        "title": "RetrievalEvidenceResponse",
+        "description": "Response payload for one evidence retrieval request."
+      },
+      "RetrieveEvidenceRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "Natural-language retrieval query"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id",
+            "description": "Target project identifier"
+          },
+          "document_limit": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Document Limit",
+            "description": "Max document hits to return",
+            "default": 5
+          },
+          "chunk_limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Chunk Limit",
+            "description": "Max chunk hits to return",
+            "default": 8
+          },
+          "asset_limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Asset Limit",
+            "description": "Max asset hits to return",
+            "default": 6
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "project_id"
+        ],
+        "title": "RetrieveEvidenceRequest",
+        "description": "Request payload for one retrieval run."
+      },
+      "ScanDocumentsRequest": {
+        "properties": {
+          "root_path": {
+            "type": "string",
+            "title": "Root Path",
+            "description": "Local folder path to scan"
+          }
+        },
+        "type": "object",
+        "required": [
+          "root_path"
+        ],
+        "title": "ScanDocumentsRequest",
+        "description": "Request payload for scanning a local folder."
+      },
+      "ScanDocumentsResponse": {
+        "properties": {
+          "root_path": {
+            "type": "string",
+            "title": "Root Path"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentListItem"
+            },
+            "type": "array",
+            "title": "Documents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "root_path",
+          "documents"
+        ],
+        "title": "ScanDocumentsResponse",
+        "description": "Response payload for scanned documents in one folder."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

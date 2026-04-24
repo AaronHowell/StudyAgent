@@ -25,6 +25,7 @@ export interface DocumentImage {
   file_name: string;
   file_path: string;
   file_url: string;
+  preview_data_url: string;
   asset_kind: string;
   asset_label: string;
   asset_index: number | null;
@@ -34,4 +35,13 @@ export interface DocumentImage {
   summary: string;
   asset_type: string;
   keywords: string[];
+}
+
+export interface ChatSessionSummary {
+  session_id: string;
+  title: string;
+  project_id: string;
+  updated_at: string;
+  message_count: number;
+  resume_capable: boolean;
 }

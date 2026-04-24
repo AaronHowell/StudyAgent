@@ -146,6 +146,9 @@ class DocumentAssetRepository(Protocol):
     def list_by_ids(self, asset_ids: list[str]) -> list[DocumentAsset]:
         """Return all matching visual assets for one id list."""
 
+    def load_content(self, asset_id: str) -> tuple[str | None, bytes] | None:
+        """Return one asset binary payload and media type."""
+
     def delete_by_document(self, document_id: str) -> None:
         """Delete all visual assets linked to one document."""
 

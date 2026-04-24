@@ -13,6 +13,7 @@ from contracts import AgentTask
 from orchestration.graph_messages import _build_agent_result_message
 from orchestration.graph_messages import _coerce_tool_call_args
 from orchestration.graph_messages import _extract_tool_calls
+from orchestration.output_summary import build_progress_summary
 from orchestration.graph_state import ToolAgentGraphState
 from orchestration.request_config import _coerce_positive_int
 from orchestration.runtime_access import _runtime
@@ -134,7 +135,16 @@ async def run_tool_specialist(
             summary=message,
             artifacts=[],
             confidence=0.0,
-            metadata={"web_sources": [], "tool_sources": [], "cancelled": True},
+            metadata={
+                "web_sources": [],
+                "tool_sources": [],
+                "cancelled": True,
+                "progress_summary": build_progress_summary(
+                    done=message,
+                    next="等待新的工具任务",
+                    pending="当前工具执行未完成",
+                ),
+            },
         )
 
     if cancel_token is not None and cancel_token.is_cancelled():
@@ -229,6 +239,11 @@ async def run_tool_specialist(
                 ],
                 "mcp_tool_name": selected_name,
                 "structured_content": call_result.get("structured_content"),
+                "progress_summary": build_progress_summary(
+                    done=f"已调用 MCP 工具 {selected_name}",
+                    next="可继续根据工具结果综合回答",
+                    pending="尚未结合本地检索或工作区上下文",
+                ),
             },
         )
     else:
@@ -239,7 +254,15 @@ async def run_tool_specialist(
             summary="ToolAgent had no available tool provider.",
             artifacts=[],
             confidence=0.0,
-            metadata={"web_sources": [], "tool_sources": []},
+            metadata={
+                "web_sources": [],
+                "tool_sources": [],
+                "progress_summary": build_progress_summary(
+                    done="已判断当前没有可用工具提供方",
+                    next="可改用本地检索或配置外部工具",
+                    pending="外部工具信息尚未获取",
+                ),
+            },
         )
 
     if cache_store is not None and selected_name in {"web_search", "url_fetch"}:
@@ -267,7 +290,16 @@ async def _run_web_flow(
             summary="ToolAgent speculative run cancelled before web execution.",
             artifacts=[],
             confidence=0.0,
-            metadata={"web_sources": [], "tool_sources": [], "cancelled": True},
+            metadata={
+                "web_sources": [],
+                "tool_sources": [],
+                "cancelled": True,
+                "progress_summary": build_progress_summary(
+                    done="工具执行在真正访问 Web 前被取消",
+                    next="等待新的工具任务",
+                    pending="当前 Web 信息尚未获取",
+                ),
+            },
         )
 
     if web_provider is None:
@@ -278,7 +310,15 @@ async def _run_web_flow(
             summary="ToolAgent could not run because no external tool provider is available.",
             artifacts=[],
             confidence=0.0,
-            metadata={"web_sources": [], "tool_sources": []},
+            metadata={
+                "web_sources": [],
+                "tool_sources": [],
+                "progress_summary": build_progress_summary(
+                    done="已判断当前没有可用外部工具提供方",
+                    next="可配置 Web/MCP 提供方后重试",
+                    pending="外部信息尚未获取",
+                ),
+            },
         )
 
     if selected_name == "url_fetch":
@@ -291,7 +331,15 @@ async def _run_web_flow(
                 summary="ToolAgent could not fetch a URL because no URL was provided.",
                 artifacts=[],
                 confidence=0.0,
-                metadata={"web_sources": [], "tool_sources": []},
+                metadata={
+                    "web_sources": [],
+                    "tool_sources": [],
+                    "progress_summary": build_progress_summary(
+                        done="已校验 URL 抓取参数",
+                        next="提供明确 URL 后可继续抓取",
+                        pending="目标页面内容尚未获取",
+                    ),
+                },
             )
         fetched = await asyncio.to_thread(web_provider.fetch, url)
         page = _serialize_web_chunk(fetched)
@@ -320,6 +368,11 @@ async def _run_web_flow(
                         tool_name="url_fetch",
                     )
                 ],
+                "progress_summary": build_progress_summary(
+                    done="已抓取一个网页并提取正文",
+                    next="可继续综合网页内容回答用户问题",
+                    pending="尚未验证更多外部来源",
+                ),
             },
         )
 
@@ -336,7 +389,16 @@ async def _run_web_flow(
             summary="ToolAgent speculative run cancelled after web search.",
             artifacts=[],
             confidence=0.0,
-            metadata={"web_sources": [], "tool_sources": [], "cancelled": True},
+            metadata={
+                "web_sources": [],
+                "tool_sources": [],
+                "cancelled": True,
+                "progress_summary": build_progress_summary(
+                    done="已完成搜索但在后续处理前被取消",
+                    next="可重新触发工具搜索",
+                    pending="搜索结果尚未完整整合",
+                ),
+            },
         )
 
     web_sources = [_serialize_web_chunk(result) for result in results]
@@ -385,6 +447,11 @@ async def _run_web_flow(
                 )
                 for item in web_sources
             ],
+            "progress_summary": build_progress_summary(
+                done="已完成外部 Web 搜索并提取候选来源",
+                next="可继续基于来源整合最终回答",
+                pending="尚未确认这些来源是否足以支撑最终结论",
+            ),
         },
     )
 

@@ -19,6 +19,18 @@ class ScanDocumentsRequest(BaseModel):
     root_path: str = Field(..., description="Local folder path to scan")
 
 
+class SelectProjectFolderRequest(BaseModel):
+    """Request payload for opening a local folder picker."""
+
+    current_path: str | None = Field(default=None, description="Current project path")
+
+
+class SelectProjectFolderResponse(BaseModel):
+    """Response payload for one local folder selection."""
+
+    path: str = Field("", description="Selected absolute path, or empty when cancelled")
+
+
 class DocumentListItem(BaseModel):
     """One scanned document item returned to the frontend."""
 
@@ -55,6 +67,7 @@ class DocumentImageItem(BaseModel):
     file_name: str
     file_path: str
     file_url: str
+    preview_data_url: str = ""
     asset_kind: str = "visual"
     asset_label: str = ""
     asset_index: int | None = None
@@ -273,3 +286,74 @@ class ChatStateResponse(BaseModel):
     messages: list[ChatMessagePayload] = Field(default_factory=list)
     interrupt: ChatInterruptPayload | None = None
     next_nodes: list[str] = Field(default_factory=list)
+
+
+class ChatTraceItemResponse(BaseModel):
+    """One trace item attached to an assistant turn."""
+
+    id: str
+    kind: str
+    title: str = ""
+    text: str = ""
+    status: str = "completed"
+    created_at: str = ""
+
+
+class ChatTurnResponse(BaseModel):
+    """One user or assistant turn restored for the frontend."""
+
+    id: str
+    role: str
+    created_at: str = ""
+    content: str = ""
+    answer_text: str = ""
+    status: str = "completed"
+    collapsed: bool = False
+    summary: dict[str, str] = Field(default_factory=dict)
+    citations: list[dict[str, object]] = Field(default_factory=list)
+    web_sources: list[dict[str, object]] = Field(default_factory=list)
+    tool_sources: list[dict[str, object]] = Field(default_factory=list)
+    trace_items: list[ChatTraceItemResponse] = Field(default_factory=list)
+
+
+class ChatSessionSnapshotResponse(BaseModel):
+    """Complete session snapshot for restoring event-driven chat UIs."""
+
+    session_id: str
+    thread_id: str
+    project_id: str
+    turns: list[ChatTurnResponse] = Field(default_factory=list)
+    interrupt: ChatInterruptPayload | None = None
+    next_nodes: list[str] = Field(default_factory=list)
+    checkpoint: dict[str, object] | None = None
+
+
+class SessionSummaryResponse(BaseModel):
+    """会话列表项。"""
+
+    session_id: str
+    project_id: str
+    title: str
+    updated_at: str
+    message_count: int
+    resume_capable: bool
+
+
+class SessionRestoreResponse(ChatStateResponse):
+    """恢复一个会话所需的完整响应。"""
+
+    session_id: str
+    checkpoint: dict[str, object] | None = None
+
+
+class WorkerEventResponse(BaseModel):
+    """独立 worker 日志项。"""
+
+    event_id: str
+    session_id: str
+    project_id: str
+    agent_id: str
+    worker_type: str
+    kind: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    created_at: str

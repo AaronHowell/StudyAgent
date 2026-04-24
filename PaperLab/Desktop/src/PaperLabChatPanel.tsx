@@ -1,85 +1,34 @@
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
-  AssistantRuntimeProvider,
-  type AppendMessage,
-  ComposerPrimitive,
-  MessagePrimitive,
-  ThreadPrimitive,
-  useAssistantState,
-  useExternalStoreRuntime,
-  type ThreadMessageLike,
-} from "@assistant-ui/react";
-import { useState } from "react";
-import { usePaperLabStream } from "./usePaperLabStream";
-
-type CitationMeta = {
-  document_id: string;
-  document_title: string;
-  chunk_id: string;
-  page?: number | null;
-  locator?: string;
-};
-
-type WebSourceMeta = {
-  url: string;
-  title: string;
-  snippet?: string;
-  excerpt?: string;
-};
-
-type ToolSourceMeta = {
-  title: string;
-  url?: string;
-  summary?: string;
-  kind?: string;
-  tool_name?: string;
-};
-
-type EvidenceCounts = {
-  document_count: number;
-  chunk_count: number;
-  asset_count: number;
-};
-
-type StreamMessage = {
-  id?: string;
-  type?: string;
-  role?: string;
-  content: unknown;
-  additional_kwargs?: Record<string, unknown>;
-  response_metadata?: Record<string, unknown>;
-};
-
-type PaperLabStreamState = {
-  messages: StreamMessage[];
-  citations?: CitationMeta[];
-  evidence_counts?: EvidenceCounts;
-};
+  type ChatTraceItem,
+  type ChatTurn,
+  type CitationRecord,
+  type InterruptPayload,
+  type MessageSummary,
+  usePaperLabStream,
+} from "./usePaperLabStream";
+import type { ChatSessionSummary } from "./types";
 
 type LoopInterruptValue = {
   phase?: string;
-  turn_id?: string;
-  iteration_count?: number;
   question?: string;
-  pending_user_messages?: number;
-  retrieve_result_status?: string;
-  tool_result_status?: string;
 };
 
-type LoopEvent = {
+type ChatThreadSummary = {
   id: string;
-  phase: string;
-  summary: string;
-  artifactType: string;
-  iterationCount: number;
+  title: string;
+  projectId: string;
+  updatedAt: string;
 };
 
 type PaperLabChatPanelProps = {
   projectId: string;
   title: string;
-  description: string;
+  description?: string;
   placeholder: string;
   contextLabel?: string;
   compact?: boolean;
+  showThreadSidebar?: boolean;
 };
 
 const apiBase =
@@ -88,74 +37,81 @@ const apiBase =
 export function PaperLabChatPanel({
   projectId,
   title,
-  description,
+  description = "",
   placeholder,
   contextLabel = "",
   compact = false,
+  showThreadSidebar = false,
 }: PaperLabChatPanelProps) {
+  const [draft, setDraft] = useState("");
   const [interventionDraft, setInterventionDraft] = useState("");
-  const stream = usePaperLabStream<PaperLabStreamState, LoopInterruptValue>({
+  const [showSummaries, setShowSummaries] = useState(false);
+  const [serverThreads, setServerThreads] = useState<ChatThreadSummary[]>([]);
+  const submitLockRef = useRef(false);
+  const stream = usePaperLabStream<LoopInterruptValue>({
     apiBaseUrl: apiBase,
-    initialValues: {
-      messages: [],
-      evidence_counts: {
-        document_count: 0,
-        chunk_count: 0,
-        asset_count: 0,
-      },
-    },
   });
 
-  const visibleMessages = dedupeVisibleMessages(
-    stream.messages.filter((message) => !isToolMessage(message)),
-  );
-  const evidenceCounts = deriveEvidenceCounts(stream.messages, stream.values.evidence_counts);
-  const loopEvents = deriveLoopEvents(stream.messages);
-  const currentInterrupt = stream.interrupt?.value;
+  const groupedThreads = useMemo(() => groupThreadsByProject(serverThreads), [serverThreads]);
 
-  const submitIntervention = async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) {
+  useEffect(() => {
+    let cancelled = false;
+
+    void stream
+      .listSessions(projectId)
+      .then((sessions) => {
+        if (cancelled) {
+          return;
+        }
+        const nextThreads = sessions.map(toThreadSummary);
+        setServerThreads(nextThreads);
+
+        const latestThread = nextThreads[0];
+        if (!latestThread) {
+          stream.resetThread();
+          return;
+        }
+
+        void stream.restoreSession({ projectId, threadId: latestThread.id }).catch(() => {
+          if (!cancelled) {
+            stream.resetThread(latestThread.id);
+          }
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setServerThreads([]);
+          stream.resetThread();
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, stream.listSessions, stream.restoreSession, stream.resetThread]);
+
+  async function handleSendMessage() {
+    if (submitLockRef.current || stream.isLoading) {
       return;
     }
-    await stream.submit(null, {
-      command: {
-        update: {
-          messages: [
-            {
-              type: "human",
-              content: trimmed,
-            },
-          ],
-        },
-        resume: { action: "continue_with_guidance" },
-      },
-      config: {
-        configurable: {
-          project_id: projectId,
-        },
-      },
-    });
-  };
 
-  const runtime = useExternalStoreRuntime<StreamMessage>({
-    isRunning: stream.isLoading,
-    messages: visibleMessages,
-    state: {
-      evidence_counts: evidenceCounts ?? null,
-    },
-    onCancel: async () => {
-      stream.stop();
-    },
-    onNew: async (message) => {
-      const text = readComposerMessageText(message).trim();
-      if (!text) {
-        return;
-      }
-      if (stream.interrupt) {
-        await submitIntervention(text);
-        return;
-      }
+    const text = draft.trim();
+    if (!text) {
+      return;
+    }
+
+    const threadId = stream.threadId;
+    upsertThreadSummary({
+      id: threadId,
+      title: buildThreadTitle(text),
+      projectId,
+      updatedAt: new Date().toISOString(),
+    });
+
+    setDraft("");
+    submitLockRef.current = true;
+
+    try {
       await stream.submit(
         {
           messages: [
@@ -166,437 +122,439 @@ export function PaperLabChatPanel({
           ],
         },
         {
-          config: {
-            configurable: {
-              project_id: projectId,
+          projectId,
+          optimisticTurns: [
+            {
+              id: `local-user-${Date.now()}`,
+              role: "user",
+              content: text,
+              created_at: new Date().toISOString(),
             },
-          },
+          ],
         },
       );
-    },
-    convertMessage: toThreadMessageLike,
-  });
+      touchThread(threadId);
+      void refreshSessions(projectId);
+    } catch {
+      // Error surfaced through stream state.
+    } finally {
+      submitLockRef.current = false;
+    }
+  }
 
-  const statusText = stream.isLoading ? "Streaming" : "Idle";
+  async function handleSubmitIntervention() {
+    if (submitLockRef.current || stream.isLoading) {
+      return;
+    }
+
+    const text = interventionDraft.trim();
+    if (!text) {
+      return;
+    }
+
+    submitLockRef.current = true;
+    try {
+      await stream.submit(null, {
+        projectId,
+        command: {
+          update: {
+            messages: [
+              {
+                type: "human",
+                content: text,
+              },
+            ],
+          },
+          resume: { action: "continue_with_guidance" },
+        },
+        optimisticTurns: [
+          {
+            id: `local-guidance-${Date.now()}`,
+            role: "user",
+            content: text,
+            created_at: new Date().toISOString(),
+          },
+        ],
+      });
+      setInterventionDraft("");
+      touchThread(stream.threadId);
+      void refreshSessions(projectId);
+    } catch {
+      // Error surfaced through stream state.
+    } finally {
+      submitLockRef.current = false;
+    }
+  }
+
+  async function openThread(thread: ChatThreadSummary) {
+    try {
+      await stream.restoreSession({ projectId: thread.projectId, threadId: thread.id });
+      touchThread(thread.id);
+    } catch {
+      stream.resetThread(thread.id);
+    }
+  }
+
+  function createNewThread() {
+    stream.resetThread();
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSendMessage();
+  }
+
+  function upsertThreadSummary(summary: ChatThreadSummary) {
+    setServerThreads((current) => {
+      const nextThreads = current.filter((thread) => thread.id !== summary.id);
+      nextThreads.unshift(summary);
+      return nextThreads;
+    });
+  }
+
+  function touchThread(threadId: string) {
+    setServerThreads((current) =>
+      current.map((thread) =>
+        thread.id === threadId
+          ? {
+              ...thread,
+              updatedAt: new Date().toISOString(),
+            }
+          : thread,
+      ),
+    );
+  }
+
+  async function refreshSessions(currentProjectId: string) {
+    const sessions = await stream.listSessions(currentProjectId);
+    setServerThreads(sessions.map(toThreadSummary));
+  }
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <section className={`agent-panel ${compact ? "compact" : "regular"}`}>
-        <header className="agent-panel-header">
-          <div>
-            <strong>{title}</strong>
-            <p>{description}</p>
-          </div>
-          <div className="agent-panel-actions">
-            <span className="chip">{statusText}</span>
-            <button className="button subtle" onClick={() => stream.switchThread(null)}>
-              New Thread
+    <section className={`chat-board ${showThreadSidebar ? "with-sidebar" : "single-pane"} ${compact ? "compact" : "regular"}`}>
+      {showThreadSidebar ? (
+        <aside className="chat-sidebar">
+          <div className="chat-sidebar-header">
+            <div>
+              <p className="section-kicker">项目</p>
+              <h3>{projectId}</h3>
+            </div>
+            <button className="button subtle small-button" onClick={createNewThread}>
+              新对话
             </button>
+          </div>
+
+          <div className="chat-project-group-list">
+            {Object.entries(groupedThreads).length === 0 ? (
+              <div className="chat-sidebar-empty">当前还没有历史对话。</div>
+            ) : (
+              Object.entries(groupedThreads).map(([groupProjectId, threads]) => (
+                <section className="chat-project-group" key={groupProjectId}>
+                  <div className="chat-project-group-title">{groupProjectId}</div>
+                  <div className="chat-thread-list">
+                    {threads.map((thread) => (
+                      <button
+                        key={thread.id}
+                        className={`chat-thread-item ${thread.id === stream.threadId ? "active" : ""}`}
+                        onClick={() => void openThread(thread)}
+                      >
+                        <strong>{thread.title}</strong>
+                        <span>{formatRelativeTime(thread.updatedAt)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ))
+            )}
+          </div>
+        </aside>
+      ) : null}
+
+      <section className="chat-main">
+        <header className="chat-main-header">
+          <div>
+            <h2>{title}</h2>
+            {description ? <p className="chat-description">{description}</p> : null}
+            {contextLabel ? <div className="chat-context-banner">{contextLabel}</div> : null}
+          </div>
+          <div className="chat-header-actions">
+            <span className={`chip chat-status-chip ${stream.isLoading ? "loading" : "idle"}`}>
+              {stream.isLoading ? "流式生成中" : "就绪"}
+            </span>
+            <button
+              className="button subtle small-button"
+              onClick={() => setShowSummaries((current) => !current)}
+            >
+              {showSummaries ? "隐藏摘要" : "显示摘要"}
+            </button>
+            {!showThreadSidebar ? (
+              <button className="button subtle small-button" onClick={createNewThread}>
+                新对话
+              </button>
+            ) : null}
           </div>
         </header>
 
-        <div className="agent-panel-meta">
-          <span className="chip">Project: {projectId}</span>
-          <span className="chip">
-            Evidence {evidenceCounts?.document_count ?? 0}/{evidenceCounts?.chunk_count ?? 0}/
-            {evidenceCounts?.asset_count ?? 0}
-          </span>
-        </div>
-        {contextLabel ? <div className="agent-context-label">{contextLabel}</div> : null}
-
         {stream.error ? (
-          <p className="error-message">
-            {stream.error instanceof Error ? stream.error.message : "Chat stream failed."}
-          </p>
+          <p className="error-message">对话流失败：{stream.error.message}</p>
         ) : null}
 
-        {loopEvents.length ? (
-          <section className="agent-loop-panel">
-            <div className="agent-loop-panel-header">
-              <strong>Agent Loop</strong>
-              <span className="chip">{loopEvents.length} events</span>
+        <div className="chat-scroll-area">
+          {stream.turns.length === 0 ? (
+            <div className="chat-empty-state">
+              <h3>开始新的对话</h3>
+              <p>你可以让 AI 解释论文、做分析、比较方法，或者帮你规划复现步骤。</p>
             </div>
-            <div className="agent-loop-timeline">
-              {loopEvents.map((event) => (
-                <div className="agent-loop-event" key={event.id}>
-                  <span className="chip loop-phase-chip">{event.phase}</span>
-                  <div>
-                    <strong>{event.summary}</strong>
-                    <p>
-                      {event.artifactType} · iteration {event.iterationCount}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
+          ) : (
+            stream.turns.map((turn) => (
+              <ChatTurnBubble
+                key={turn.id}
+                turn={turn}
+                showSummary={showSummaries}
+                onToggleTrace={() => stream.toggleTurnCollapsed(turn.id)}
+              />
+            ))
+          )}
+        </div>
 
         {stream.interrupt ? (
-          <section className="agent-interrupt-panel">
-            <div className="agent-interrupt-copy">
-              <strong>Loop paused at {currentInterrupt?.phase ?? "checkpoint"}</strong>
-              <p>
-                The backend reached a GuidanceGate. You can continue directly, or send a guidance
-                message below and it will be injected into the current run.
-              </p>
-              {currentInterrupt?.question ? <p>Current question: {currentInterrupt.question}</p> : null}
-            </div>
-            <div className="agent-interrupt-actions">
-              <button
-                className="button subtle"
-                onClick={() =>
-                  void stream.submit(null, {
-                    command: { resume: { action: "continue" } },
-                    config: {
-                      configurable: {
-                        project_id: projectId,
-                      },
-                    },
-                  })
-                }
-              >
-                Continue
-              </button>
-            </div>
-            <div className="agent-interrupt-compose">
-              <textarea
-                className="input textarea"
-                rows={3}
-                placeholder="Inject guidance into the current loop run"
-                value={interventionDraft}
-                onChange={(event) => setInterventionDraft(event.target.value)}
-              />
-              <button
-                className="button primary"
-                onClick={async () => {
-                  await submitIntervention(interventionDraft);
-                  setInterventionDraft("");
-                }}
-              >
-                Inject Guidance
-              </button>
-            </div>
-          </section>
+          <InterruptPanel
+            interrupt={stream.interrupt}
+            interventionDraft={interventionDraft}
+            onInterventionDraftChange={setInterventionDraft}
+            onContinue={() =>
+              void stream.submit(null, {
+                projectId,
+                command: { resume: { action: "continue" } },
+              })
+            }
+            onSubmitIntervention={() => void handleSubmitIntervention()}
+          />
         ) : null}
 
-        <ThreadPrimitive.Root className="agent-thread-root">
-          <ThreadPrimitive.If empty>
-            <div className="chat-empty">
-              Agent is ready. Start a grounded question and the thread will stream from FastAPI.
-            </div>
-          </ThreadPrimitive.If>
-
-          <ThreadPrimitive.Viewport className="agent-thread-viewport">
-            <ThreadPrimitive.Messages
-              components={{
-                UserMessage: UserMessageCard,
-                AssistantMessage: AssistantMessageCard,
-              }}
-            />
-          </ThreadPrimitive.Viewport>
-
-          <ThreadPrimitive.ViewportFooter className="agent-thread-footer">
-            <ComposerPrimitive.Root className="agent-composer">
-              <ComposerPrimitive.Input
-                className="input textarea agent-composer-input"
-                rows={compact ? 4 : 6}
-                autoFocus
-                placeholder={placeholder}
-              />
-              <div className="agent-composer-actions">
-                <ComposerPrimitive.Cancel className="button subtle">
-                  Stop
-                </ComposerPrimitive.Cancel>
-                <ComposerPrimitive.Send className="button primary">
-                  Send
-                </ComposerPrimitive.Send>
-              </div>
-            </ComposerPrimitive.Root>
-          </ThreadPrimitive.ViewportFooter>
-        </ThreadPrimitive.Root>
-      </section>
-    </AssistantRuntimeProvider>
-  );
-}
-
-function UserMessageCard() {
-  return (
-    <MessagePrimitive.Root className="agent-message user">
-      <div className="agent-message-label">You</div>
-      <div className="agent-message-body">
-        <MessagePrimitive.Content />
-      </div>
-    </MessagePrimitive.Root>
-  );
-}
-
-function AssistantMessageCard() {
-  const citations = useAssistantState(({ message }) => {
-    const custom = message.metadata?.custom as { citations?: CitationMeta[] } | undefined;
-    return custom?.citations ?? [];
-  });
-  const webSources = useAssistantState(({ message }) => {
-    const custom = message.metadata?.custom as { webSources?: WebSourceMeta[] } | undefined;
-    return custom?.webSources ?? [];
-  });
-  const toolSources = useAssistantState(({ message }) => {
-    const custom = message.metadata?.custom as { toolSources?: ToolSourceMeta[] } | undefined;
-    return custom?.toolSources ?? [];
-  });
-
-  return (
-    <MessagePrimitive.Root className="agent-message assistant">
-      <div className="agent-message-label">PaperLab</div>
-      <div className="agent-message-body">
-        <MessagePrimitive.Content />
-        {citations.length ? (
-          <div className="citation-row">
-            {citations.map((citation) => (
-              <span className="chip citation-chip" key={`${citation.chunk_id}-${citation.locator ?? citation.page ?? "source"}`}>
-                {citation.document_title} {citation.locator ?? (citation.page ? `p.${citation.page}` : "")}
-              </span>
-            ))}
+        <div className="chat-composer">
+          <textarea
+            className="input textarea chat-composer-input"
+            rows={compact ? 4 : 5}
+            placeholder={placeholder}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleComposerKeyDown}
+          />
+          <div className="chat-composer-actions">
+            <button className="button subtle small-button" onClick={() => stream.stop()} disabled={!stream.isLoading}>
+              停止
+            </button>
+            <button
+              className="button primary send-button"
+              onClick={() => void handleSendMessage()}
+              disabled={stream.isLoading || !draft.trim()}
+            >
+              发送
+            </button>
           </div>
-        ) : null}
-        {webSources.length ? (
-          <div className="citation-row">
-            {webSources.map((source) => (
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function InterruptPanel({
+  interrupt,
+  interventionDraft,
+  onInterventionDraftChange,
+  onContinue,
+  onSubmitIntervention,
+}: {
+  interrupt: InterruptPayload<LoopInterruptValue>;
+  interventionDraft: string;
+  onInterventionDraftChange: (value: string) => void;
+  onContinue: () => void;
+  onSubmitIntervention: () => void;
+}) {
+  return (
+    <section className="chat-interrupt-panel">
+      <strong>当前流程已暂停</strong>
+      {interrupt.value.question ? <p>{interrupt.value.question}</p> : null}
+      <div className="button-row">
+        <button className="button subtle small-button" onClick={onContinue}>
+          继续
+        </button>
+      </div>
+      <textarea
+        className="input textarea"
+        rows={3}
+        placeholder="给当前流程补充指导"
+        value={interventionDraft}
+        onChange={(event) => onInterventionDraftChange(event.target.value)}
+      />
+      <button className="button primary small-button" onClick={onSubmitIntervention}>
+        注入指导
+      </button>
+    </section>
+  );
+}
+
+function ChatTurnBubble({
+  turn,
+  showSummary,
+  onToggleTrace,
+}: {
+  turn: ChatTurn;
+  showSummary: boolean;
+  onToggleTrace: () => void;
+}) {
+  if (turn.role === "user") {
+    return (
+      <article className="chat-message user">
+        <div className="chat-message-label">我</div>
+        <div className="chat-message-body">{turn.content ?? ""}</div>
+      </article>
+    );
+  }
+
+  const traceItems = turn.trace_items ?? [];
+  const citations = turn.citations ?? [];
+  const webSources = turn.web_sources ?? [];
+  const toolSources = turn.tool_sources ?? [];
+  const summary = turn.summary;
+  const traceButtonLabel = turn.status === "streaming" ? "思考中" : turn.collapsed ? "已完成思考" : "收起思考";
+
+  return (
+    <article className="chat-message assistant">
+      <div className="chat-message-label">AI</div>
+
+      {traceItems.length > 0 ? (
+        <div className="chat-trace-shell">
+          <button className="chat-trace-toggle" onClick={onToggleTrace}>
+            {traceButtonLabel}
+          </button>
+          {!turn.collapsed ? (
+            <div className="chat-trace-panel">
+              {traceItems.map((item) => (
+                <TraceItemRow key={item.id} item={item} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="chat-message-body">{turn.answer_text ?? ""}</div>
+
+      {showSummary && summary ? (
+        <div className="chat-message-summary">
+          {summary.done ? <p>已完成：{summary.done}</p> : null}
+          {summary.next ? <p>下一步：{summary.next}</p> : null}
+          {summary.pending ? <p>未完成：{summary.pending}</p> : null}
+        </div>
+      ) : null}
+
+      {citations.length > 0 ? (
+        <div className="citation-row">
+          {citations.map((citation) => (
+            <span className="chip citation-chip" key={`${citation.chunk_id}-${citation.locator ?? citation.page ?? "source"}`}>
+              {citation.document_title} {citation.locator ?? (citation.page ? `p.${citation.page}` : "")}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {webSources.length > 0 ? (
+        <div className="citation-row">
+          {webSources.map((source) => (
+            <a className="chip citation-chip" key={source.url} href={source.url} target="_blank" rel="noreferrer">
+              {source.title || source.url}
+            </a>
+          ))}
+        </div>
+      ) : null}
+
+      {toolSources.length > 0 ? (
+        <div className="citation-row">
+          {toolSources.map((source, index) =>
+            source.url ? (
               <a
                 className="chip citation-chip"
-                key={source.url}
+                key={`${source.url}-${index}`}
                 href={source.url}
                 target="_blank"
                 rel="noreferrer"
               >
-                {source.title || source.url}
+                {source.title || source.tool_name || "工具来源"}
               </a>
-            ))}
-          </div>
-        ) : null}
-        {toolSources.length ? (
-          <div className="citation-row">
-            {toolSources.map((source, index) =>
-              source.url ? (
-                <a
-                  className="chip citation-chip"
-                  key={`${source.url}-${index}`}
-                  href={source.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {source.title || source.tool_name || "Tool source"}
-                </a>
-              ) : (
-                <span className="chip citation-chip" key={`${source.title}-${index}`}>
-                  {source.title || source.tool_name || "Tool source"}
-                </span>
-              ),
-            )}
-          </div>
-        ) : null}
-      </div>
-    </MessagePrimitive.Root>
+            ) : (
+              <span className="chip citation-chip" key={`${source.title}-${index}`}>
+                {source.title || source.tool_name || "工具来源"}
+              </span>
+            ),
+          )}
+        </div>
+      ) : null}
+    </article>
   );
 }
 
-function readComposerMessageText(message: AppendMessage): string {
-  return message.content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("\n\n");
+function TraceItemRow({ item }: { item: ChatTraceItem }) {
+  return (
+    <div className={`chat-trace-item ${item.kind}`}>
+      <div className="chat-trace-item-head">
+        <strong>{traceItemLabel(item)}</strong>
+      </div>
+      <div className="chat-trace-item-body">{item.text}</div>
+    </div>
+  );
 }
 
-function toThreadMessageLike(message: StreamMessage): ThreadMessageLike {
+function traceItemLabel(item: ChatTraceItem): string {
+  if (item.kind === "tool_call") {
+    return item.title || "工具调用";
+  }
+  if (item.kind === "tool_result") {
+    return item.title || "工具结果";
+  }
+  return item.title || "思考";
+}
+
+function groupThreadsByProject(threads: ChatThreadSummary[]) {
+  return threads.reduce<Record<string, ChatThreadSummary[]>>((groups, thread) => {
+    if (!groups[thread.projectId]) {
+      groups[thread.projectId] = [];
+    }
+    groups[thread.projectId].push(thread);
+    groups[thread.projectId].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return groups;
+  }, {});
+}
+
+function buildThreadTitle(content: string) {
+  return content.length > 24 ? `${content.slice(0, 24)}...` : content;
+}
+
+function toThreadSummary(session: ChatSessionSummary): ChatThreadSummary {
   return {
-    id: message.id,
-    role: normalizeRole(message),
-    content: normalizeContent(message.content),
-    metadata: {
-      custom: {
-        citations: extractCitations(message),
-        webSources: extractWebSources(message),
-        toolSources: extractToolSources(message),
-      },
-    },
+    id: session.session_id,
+    title: session.title,
+    projectId: session.project_id,
+    updatedAt: session.updated_at,
   };
 }
 
-function normalizeRole(message: StreamMessage): ThreadMessageLike["role"] {
-  const role = message.type ?? message.role ?? "assistant";
-  if (role === "human" || role === "user") {
-    return "user";
+function formatRelativeTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
   }
-  if (role === "system") {
-    return "system";
-  }
-  return "assistant";
-}
 
-function normalizeContent(content: unknown): string {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") {
-          return part;
-        }
-        if (typeof part === "object" && part && "text" in part) {
-          return String((part as { text?: unknown }).text ?? "");
-        }
-        return "";
-      })
-      .join("");
-  }
-  return String(content ?? "");
-}
-
-function extractCitations(message: StreamMessage): CitationMeta[] {
-  const candidate =
-    readMessageMetadata(message).citations ??
-    message.response_metadata?.citations ??
-    message.additional_kwargs?.citations ??
-    [];
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate
-    .filter((item): item is CitationMeta => typeof item === "object" && item !== null)
-    .map((item) => ({
-      document_id: String(item.document_id ?? ""),
-      document_title: String(item.document_title ?? ""),
-      chunk_id: String(item.chunk_id ?? ""),
-      page:
-        typeof item.page === "number" || item.page == null
-          ? item.page
-          : Number(item.page),
-      locator: typeof item.locator === "string" ? item.locator : "",
-    }));
-}
-
-function extractWebSources(message: StreamMessage): WebSourceMeta[] {
-  const candidate = readMessageMetadata(message).web_sources ?? [];
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate
-    .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-    .map((item) => ({
-      url: String(item.url ?? ""),
-      title: String(item.title ?? ""),
-      snippet: typeof item.snippet === "string" ? item.snippet : "",
-      excerpt: typeof item.excerpt === "string" ? item.excerpt : "",
-    }))
-    .filter((item) => Boolean(item.url));
-}
-
-function extractToolSources(message: StreamMessage): ToolSourceMeta[] {
-  const candidate = readMessageMetadata(message).tool_sources ?? [];
-  if (!Array.isArray(candidate)) {
-    return [];
-  }
-  return candidate
-    .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-    .map((item) => ({
-      title: String(item.title ?? ""),
-      url: typeof item.url === "string" ? item.url : "",
-      summary: typeof item.summary === "string" ? item.summary : "",
-      kind: typeof item.kind === "string" ? item.kind : "",
-      tool_name: typeof item.tool_name === "string" ? item.tool_name : "",
-    }));
-}
-
-function isToolMessage(message: StreamMessage): boolean {
-  return (message.type ?? message.role ?? "") === "tool";
-}
-
-function readMessageMetadata(message: StreamMessage): Record<string, unknown> {
-  const additional = message.additional_kwargs;
-  if (
-    additional &&
-    typeof additional === "object" &&
-    "metadata" in additional &&
-    typeof additional.metadata === "object" &&
-    additional.metadata !== null
-  ) {
-    return additional.metadata as Record<string, unknown>;
-  }
-  if (message.response_metadata && typeof message.response_metadata === "object") {
-    return message.response_metadata;
-  }
-  return {};
-}
-
-function deriveEvidenceCounts(
-  messages: StreamMessage[],
-  fallback: EvidenceCounts | undefined,
-): EvidenceCounts | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const metadata = readMessageMetadata(messages[index]);
-    const candidate = metadata.evidence_counts;
-    if (
-      candidate &&
-      typeof candidate === "object" &&
-      candidate !== null &&
-      "document_count" in candidate &&
-      "chunk_count" in candidate &&
-      "asset_count" in candidate
-    ) {
-      return {
-        document_count: Number(candidate.document_count ?? 0),
-        chunk_count: Number(candidate.chunk_count ?? 0),
-        asset_count: Number(candidate.asset_count ?? 0),
-      };
-    }
-  }
-  return fallback;
-}
-
-function dedupeVisibleMessages(messages: StreamMessage[]): StreamMessage[] {
-  const deduped: StreamMessage[] = [];
-  for (const message of messages) {
-    const previous = deduped[deduped.length - 1];
-    if (
-      previous &&
-      normalizeRole(previous) === "user" &&
-      normalizeRole(message) === "user" &&
-      normalizeContent(previous.content) === normalizeContent(message.content)
-    ) {
-      const previousStructured = readMessageMetadata(previous).artifact_type === "question";
-      const currentStructured = readMessageMetadata(message).artifact_type === "question";
-      if (!previousStructured && currentStructured) {
-        deduped[deduped.length - 1] = message;
-        continue;
-      }
-      if (previousStructured && !currentStructured) {
-        continue;
-      }
-    }
-    deduped.push(message);
-  }
-  return deduped;
-}
-
-function deriveLoopEvents(messages: StreamMessage[]): LoopEvent[] {
-  return messages
-    .filter((message) => isToolMessage(message))
-    .map((message, index) => {
-      const metadata = readMessageMetadata(message);
-      const artifactType = String(metadata.artifact_type ?? "");
-      if (!["loop_status", "agent_task", "agent_result"].includes(artifactType)) {
-        return null;
-      }
-      return {
-        id: String(message.id ?? `${artifactType}-${index}`),
-        phase: String(metadata.phase ?? artifactType),
-        summary: normalizeContent(message.content),
-        artifactType,
-        iterationCount: Number(metadata.iteration_count ?? 0),
-      } satisfies LoopEvent;
-    })
-    .filter((event): event is LoopEvent => event !== null);
+  return date.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export function buildDocumentFileUrl(path: string): string {

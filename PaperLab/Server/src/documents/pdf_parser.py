@@ -190,8 +190,6 @@ class PdfParser:
             pages = self.extract_pdf_pages(path)
 
         document_asset_dir = self._build_asset_output_dir(path)
-        if export_files:
-            document_asset_dir.mkdir(parents=True, exist_ok=True)
 
         extracted_images: list[DocumentAsset] = []
         pdf_document = self._open_fitz_document(path)
@@ -238,9 +236,6 @@ class PdfParser:
                     ):
                         continue
 
-                    if export_files:
-                        output_path.write_bytes(image_bytes)
-
                     extracted_images.append(
                         DocumentAsset(
                             id=str(
@@ -251,7 +246,7 @@ class PdfParser:
                             ),
                             document_id=document.id,
                             page_number=page_number,
-                            file_path=str(output_path.resolve()) if export_files else "",
+                            file_path="",
                             file_name=output_path.name,
                             asset_kind=asset_kind,
                             asset_label=asset_label,
@@ -262,6 +257,8 @@ class PdfParser:
                             keywords=keywords,
                             related_chunk_ids=[],
                             media_type=self._guess_media_type(output_path),
+                            byte_size=len(image_bytes),
+                            content_bytes=image_bytes,
                             metadata={
                                 "source_path": document.path,
                                 "project_id": document.project_id,
@@ -272,7 +269,7 @@ class PdfParser:
                                 "width": width,
                                 "height": height,
                                 "extraction_method": extraction_method,
-                                "exported": export_files,
+                                "exported": False,
                             },
                         )
                     )
@@ -990,10 +987,6 @@ class PdfParser:
             keywords = self._extract_keywords(caption, nearby_text)
             output_path = document_asset_dir / image_name
 
-            if export_files:
-                document_asset_dir.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(image_bytes)
-
             assets.append(
                 DocumentAsset(
                     id=str(
@@ -1004,7 +997,7 @@ class PdfParser:
                     ),
                     document_id=document.id,
                     page_number=page_number,
-                    file_path=str(output_path.resolve()) if export_files else "",
+                    file_path="",
                     file_name=output_path.name,
                     asset_kind=asset_kind,
                     asset_label=asset_label,
@@ -1015,6 +1008,8 @@ class PdfParser:
                     keywords=keywords,
                     related_chunk_ids=[],
                     media_type=self._guess_media_type(output_path),
+                    byte_size=len(image_bytes),
+                    content_bytes=image_bytes,
                     metadata={
                         "source_path": document.path,
                         "project_id": document.project_id,
@@ -1025,7 +1020,7 @@ class PdfParser:
                         "width": width,
                         "height": height,
                         "extraction_method": "caption_anchored_region",
-                        "exported": export_files,
+                        "exported": False,
                     },
                 )
             )
