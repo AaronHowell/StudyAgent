@@ -1,6 +1,7 @@
 """本包定义 PaperLab 的核心领域模型与抽象接口。"""
 
 from domain.models import (
+    AssetCitation,
     AssetHit,
     Chunk,
     ChunkHit,
@@ -46,6 +47,7 @@ from domain.ports import (
 __all__ = [
     "AnswerCritic",
     "AnswerWriter",
+    "AssetCitation",
     "AssetHit",
     "Chunk",
     "ChunkBuilder",

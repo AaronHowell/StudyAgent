@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 from typing import Iterable
 
-from domain import Citation, EvidencePack, LLMProvider
+from domain import AssetCitation, Citation, EvidencePack, LLMProvider
+from generation.citation_formatter import serialize_asset_citation, serialize_citation
 from prompts.builders import build_grounded_answer_prompt
 
 
@@ -59,6 +61,8 @@ class AnswerQuestionUseCase:
                 "document_count": len(evidence_pack.documents),
                 "chunk_count": len(evidence_pack.text_chunks),
                 "asset_count": len(evidence_pack.assets),
+                "multimodal": False,
+                "visual_evidence_mode": "metadata",
             },
         )
 
@@ -73,6 +77,11 @@ class AnswerQuestionUseCase:
             data={
                 "answer": final_answer,
                 "citations": [self._serialize_citation(citation) for citation in evidence_pack.citations],
+                "asset_citations": [
+                    self._serialize_asset_citation(citation)
+                    for citation in evidence_pack.asset_citations
+                ],
+                "asset_sources": [self._serialize_asset_source(hit) for hit in evidence_pack.assets],
             },
         )
 
@@ -87,11 +96,23 @@ class AnswerQuestionUseCase:
 
     @staticmethod
     def _serialize_citation(citation: Citation) -> dict[str, object]:
+        return serialize_citation(citation)
+
+    @staticmethod
+    def _serialize_asset_citation(citation: AssetCitation) -> dict[str, object]:
+        return serialize_asset_citation(citation)
+
+    @staticmethod
+    def _serialize_asset_source(hit) -> dict[str, object]:
         return {
-            "document_id": citation.document_id,
-            "document_title": citation.document_title,
-            "chunk_id": citation.chunk_id,
-            "page": citation.page,
-            "locator": citation.locator,
+            "asset_id": hit.asset_id,
+            "document_id": hit.document_id,
+            "page_number": hit.page_number,
+            "asset_label": hit.asset_label,
+            "caption": hit.caption,
+            "summary": hit.summary,
+            "asset_type": hit.asset_type,
+            "file_name": hit.file_name,
+            "file_url": f"/documents/assets/{quote(hit.asset_id)}/content",
         }
 

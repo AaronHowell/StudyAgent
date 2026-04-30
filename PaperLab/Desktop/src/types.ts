@@ -45,3 +45,27 @@ export interface ChatSessionSummary {
   message_count: number;
   resume_capable: boolean;
 }
+
+export interface ReproductionTask {
+  task_id: string;
+  title: string;
+  description: string;
+  task_type: string;
+  status: string;
+  assigned_to?: string | null;
+  blocked_by: string[];
+  artifact_ids: string[];
+  notes: string;
+}
+
+export interface ReproductionRun {
+  run_id: string;
+  project_id: string;
+  objective: string;
+  status: string;
+  tasks: Record<string, ReproductionTask>;
+  artifacts: Record<string, Record<string, unknown>>;
+  workspace_path: string;
+  report_path: string;
+  error: string;
+}

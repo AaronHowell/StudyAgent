@@ -24,6 +24,27 @@ export type CitationRecord = {
   locator?: string;
 };
 
+export type AssetCitationRecord = {
+  asset_id: string;
+  document_id: string;
+  document_title: string;
+  page?: number | null;
+  label?: string;
+  locator?: string;
+};
+
+export type AssetSourceRecord = {
+  asset_id: string;
+  document_id: string;
+  page_number?: number | null;
+  asset_label?: string;
+  caption?: string;
+  summary?: string;
+  asset_type?: string;
+  file_name?: string;
+  file_url?: string;
+};
+
 export type SourceRecord = {
   title?: string;
   url?: string;
@@ -40,6 +61,8 @@ export type ChatTurn = {
   collapsed?: boolean;
   summary?: MessageSummary;
   citations?: CitationRecord[];
+  asset_citations?: AssetCitationRecord[];
+  asset_sources?: AssetSourceRecord[];
   web_sources?: SourceRecord[];
   tool_sources?: SourceRecord[];
   trace_items?: ChatTraceItem[];
@@ -129,6 +152,8 @@ type TurnCompletedEvent = {
   turn_id: string;
   summary?: MessageSummary;
   citations?: CitationRecord[];
+  asset_citations?: AssetCitationRecord[];
+  asset_sources?: AssetSourceRecord[];
   web_sources?: SourceRecord[];
   tool_sources?: SourceRecord[];
   turn?: Partial<ChatTurn>;
@@ -180,6 +205,8 @@ function ensureAssistantTurn(turns: ChatTurn[], event: AssistantTurnStartedEvent
       collapsed: false,
       trace_items: [],
       citations: [],
+      asset_citations: [],
+      asset_sources: [],
       web_sources: [],
       tool_sources: [],
       summary: { done: "", next: "", pending: "" },
@@ -431,6 +458,8 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
                         collapsed: true,
                         summary: event.summary ?? turn.summary,
                         citations: event.citations ?? turn.citations,
+                        asset_citations: event.asset_citations ?? turn.asset_citations,
+                        asset_sources: event.asset_sources ?? turn.asset_sources,
                         web_sources: event.web_sources ?? turn.web_sources,
                         tool_sources: event.tool_sources ?? turn.tool_sources,
                       }

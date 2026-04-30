@@ -5,46 +5,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from domain import EvidencePack
-
-
-def build_grounded_answer_prompt(
-    question: str,
-    evidence_pack: EvidencePack,
-    memory_summary: str = "",
-) -> str:
-    """Build the legacy grounded QA prompt from retrieved evidence."""
-
-    document_lines = [
-        f"- {index + 1}. {hit.title} ({hit.path})"
-        for index, hit in enumerate(evidence_pack.documents)
-    ]
-    chunk_lines = [
-        (
-            f"[{index + 1}] {hit.text}\n"
-            f"source: {hit.document_id} page={hit.page} section={hit.section or ''}".strip()
-        )
-        for index, hit in enumerate(evidence_pack.text_chunks)
-    ]
-    asset_lines = [
-        (
-            f"[A{index + 1}] {hit.caption or hit.summary or hit.asset_label}\n"
-            f"source: {hit.document_id} page={hit.page_number}"
-        )
-        for index, hit in enumerate(evidence_pack.assets)
-    ]
-
-    return (
-        "You are PaperLab. Answer only from the provided evidence.\n"
-        "Rules:\n"
-        "1. Do not invent facts not present in the evidence.\n"
-        "2. When making a factual claim, cite it with [n] using the chunk references.\n"
-        "3. If evidence is insufficient, say so clearly.\n\n"
-        f"Question:\n{question}\n\n"
-        f"Relevant memory:\n{memory_summary or '- none'}\n\n"
-        f"Candidate documents:\n{chr(10).join(document_lines) or '- none'}\n\n"
-        f"Text evidence:\n{chr(10).join(chunk_lines) or '- none'}\n\n"
-        f"Asset evidence:\n{chr(10).join(asset_lines) or '- none'}\n"
-    )
+from generation.message_builders import build_grounded_answer_prompt
 
 
 def build_main_route_messages(

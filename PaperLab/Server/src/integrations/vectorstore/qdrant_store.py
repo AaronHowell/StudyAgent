@@ -22,6 +22,7 @@ DOCUMENT_VECTOR_TITLE = "title"
 DOCUMENT_VECTOR_SUMMARY = "summary"
 ASSET_VECTOR_CAPTION = "caption"
 ASSET_VECTOR_SUMMARY = "summary"
+ASSET_VECTOR_IMAGE = "image"
 
 
 @dataclass(slots=True)
@@ -158,6 +159,7 @@ class QdrantChunkVectorStore:
         *,
         caption_vector_size: int,
         summary_vector_size: int,
+        image_vector_size: int | None = None,
     ) -> None:
         """Ensure the visual-asset collection exists with named vectors.
 
@@ -169,13 +171,13 @@ class QdrantChunkVectorStore:
             summary_vector_size: 摘要向量维度。
         """
 
-        self._ensure_named_vector_collection(
-            collection_name=self.config.asset_collection_name,
-            vectors_config={
-                ASSET_VECTOR_CAPTION: caption_vector_size,
-                ASSET_VECTOR_SUMMARY: summary_vector_size,
-            },
-        )
+        vectors_config = {
+            ASSET_VECTOR_CAPTION: caption_vector_size,
+            ASSET_VECTOR_SUMMARY: summary_vector_size,
+        }
+        if image_vector_size is not None:
+            vectors_config[ASSET_VECTOR_IMAGE] = image_vector_size
+        self._ensure_named_vector_collection(collection_name=self.config.asset_collection_name, vectors_config=vectors_config)
 
     def upsert_chunks(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
         """Insert or update chunk vectors in Qdrant using one content vector.
@@ -305,6 +307,7 @@ class QdrantChunkVectorStore:
         assets: list[DocumentAsset],
         caption_vectors: list[list[float]],
         summary_vectors: list[list[float]],
+        image_vectors: list[list[float]] | None = None,
     ) -> None:
         """Insert or update visual-asset vectors.
 
@@ -320,30 +323,34 @@ class QdrantChunkVectorStore:
             ValueError: 当输入列表长度不一致时抛出。
         """
 
-        self._validate_vector_lengths(assets, caption_vectors, summary_vectors)
+        self._validate_vector_lengths(assets, caption_vectors, summary_vectors, image_vectors)
         if not assets:
             return
 
-        points = [
-            models.PointStruct(
-                id=self._to_point_id(asset.id),
-                vector={
-                    ASSET_VECTOR_CAPTION: caption_vectors[index],
-                    ASSET_VECTOR_SUMMARY: summary_vectors[index],
-                },
-                payload={
-                    "asset_id": asset.id,
-                    "document_id": asset.document_id,
-                    "project_id": asset.metadata.get("project_id", ""),
-                    "page_number": asset.page_number,
-                    "asset_kind": asset.asset_kind,
-                    "asset_label": asset.asset_label,
-                    "asset_type": asset.asset_type,
-                    "file_name": asset.file_name,
-                },
+        points = []
+        for index, asset in enumerate(assets):
+            vector_map = {
+                ASSET_VECTOR_CAPTION: caption_vectors[index],
+                ASSET_VECTOR_SUMMARY: summary_vectors[index],
+            }
+            if image_vectors is not None:
+                vector_map[ASSET_VECTOR_IMAGE] = image_vectors[index]
+            points.append(
+                models.PointStruct(
+                    id=self._to_point_id(asset.id),
+                    vector=vector_map,
+                    payload={
+                        "asset_id": asset.id,
+                        "document_id": asset.document_id,
+                        "project_id": asset.metadata.get("project_id", ""),
+                        "page_number": asset.page_number,
+                        "asset_kind": asset.asset_kind,
+                        "asset_label": asset.asset_label,
+                        "asset_type": asset.asset_type,
+                        "file_name": asset.file_name,
+                    },
+                )
             )
-            for index, asset in enumerate(assets)
-        ]
 
         self.client.upsert(
             collection_name=self.config.asset_collection_name,

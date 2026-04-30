@@ -222,6 +222,40 @@ class AgentAnswerStreamRequest(BaseModel):
     asset_limit: int = Field(6, ge=1, le=50)
 
 
+class CreateReproductionRunRequest(BaseModel):
+    project_id: str
+    objective: str
+    paper_ids: list[str] = Field(default_factory=list)
+    permission_mode: str = "manual"
+
+
+class CreateReproductionRunResponse(BaseModel):
+    run_id: str
+    status: str
+    workspace_path: str
+    report_path: str
+
+
+class ReproductionRunResponse(BaseModel):
+    run_id: str
+    project_id: str
+    objective: str
+    status: str
+    tasks: dict[str, dict[str, object]]
+    artifacts: dict[str, dict[str, object]]
+    workspace_path: str
+    report_path: str
+    error: str = ""
+
+
+class ReproductionRunEventResponse(BaseModel):
+    event_id: str
+    event_type: str
+    message: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    created_at: str
+
+
 class ChatMessageInput(BaseModel):
     """Frontend message item accepted by the chat bridge."""
 
@@ -311,6 +345,8 @@ class ChatTurnResponse(BaseModel):
     collapsed: bool = False
     summary: dict[str, str] = Field(default_factory=dict)
     citations: list[dict[str, object]] = Field(default_factory=list)
+    asset_citations: list[dict[str, object]] = Field(default_factory=list)
+    asset_sources: list[dict[str, object]] = Field(default_factory=list)
     web_sources: list[dict[str, object]] = Field(default_factory=list)
     tool_sources: list[dict[str, object]] = Field(default_factory=list)
     trace_items: list[ChatTraceItemResponse] = Field(default_factory=list)

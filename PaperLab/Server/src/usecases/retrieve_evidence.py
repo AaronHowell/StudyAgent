@@ -21,6 +21,8 @@ from domain import (
     ScoredId,
     VectorStore,
 )
+from retrieval.evidence_pack import build_evidence_pack
+from retrieval.fusion import fuse_asset_hits, fuse_document_hits
 
 
 @dataclass(slots=True)
@@ -265,11 +267,24 @@ class RetrieveEvidenceUseCase:
 
         resolved_query_vector = query_vector or self.embedding_provider.embed_texts([query])[0]
         recall_limit = max(limit, self.asset_recall_k)
-        scored_ids = self.vector_store.search_assets(
+        summary_hits = self.vector_store.search_assets(
             query_vector=resolved_query_vector,
             project_id=project_id,
             vector_name="summary",
             document_ids=document_ids,
+            limit=recall_limit,
+        )
+        caption_hits = self.vector_store.search_assets(
+            query_vector=resolved_query_vector,
+            project_id=project_id,
+            vector_name="caption",
+            document_ids=document_ids,
+            limit=recall_limit,
+        )
+        scored_ids = fuse_asset_hits(
+            summary_hits=summary_hits,
+            caption_hits=caption_hits,
+            image_hits=[],
             limit=recall_limit,
         )
         assets = self.asset_repository.list_by_ids([hit.entity_id for hit in scored_ids])
@@ -285,7 +300,12 @@ class RetrieveEvidenceUseCase:
             document_ids=document_ids,
             top_k=limit,
         )
-        return reranked_asset_hits, self._serialize_asset_rerank_log(scored_ids, reranked_asset_hits)
+        return reranked_asset_hits, self._serialize_asset_rerank_log(
+            raw_hits=scored_ids,
+            reranked_hits=reranked_asset_hits,
+            summary_hits=summary_hits,
+            caption_hits=caption_hits,
+        )
 
     def build_evidence_pack(
         self,
@@ -307,26 +327,11 @@ class RetrieveEvidenceUseCase:
             - EvidencePack: 后续 Agent / API 可直接消费的证据包。
         """
 
-        document_title_by_id = {
-            hit.document_id: hit.title
-            for hit in document_hits
-        }
-        citations = [
-            Citation(
-                document_id=hit.document_id,
-                document_title=document_title_by_id.get(hit.document_id, ""),
-                chunk_id=hit.chunk_id,
-                page=hit.page,
-                locator=f"p.{hit.page}" if hit.page is not None else "",
-            )
-            for hit in chunk_hits
-        ]
-        return EvidencePack(
+        return build_evidence_pack(
             query=query,
-            documents=document_hits,
-            text_chunks=chunk_hits,
-            assets=asset_hits,
-            citations=citations,
+            document_hits=document_hits,
+            chunk_hits=chunk_hits,
+            asset_hits=asset_hits,
         )
 
     @staticmethod
@@ -338,15 +343,7 @@ class RetrieveEvidenceUseCase:
     ) -> list[ScoredId]:
         """Fuse title and summary document retrieval results into one ranked list."""
 
-        aggregated: dict[str, float] = {}
-        for rank, hit in enumerate(title_hits, start=1):
-            aggregated[hit.entity_id] = aggregated.get(hit.entity_id, 0.0) + (0.7 * hit.score) + (1.0 / (rank + 1))
-        for rank, hit in enumerate(summary_hits, start=1):
-            aggregated[hit.entity_id] = aggregated.get(hit.entity_id, 0.0) + (1.0 * hit.score) + (1.0 / (rank + 1))
-
-        fused_hits = [ScoredId(entity_id=entity_id, score=score) for entity_id, score in aggregated.items()]
-        fused_hits.sort(key=lambda item: item.score, reverse=True)
-        return fused_hits[:limit]
+        return fuse_document_hits(title_hits=title_hits, summary_hits=summary_hits, limit=limit)
 
     def _rerank_document_hits(
         self,
@@ -587,9 +584,13 @@ class RetrieveEvidenceUseCase:
     def _serialize_asset_rerank_log(
         raw_hits: list[ScoredId],
         reranked_hits: list[AssetHit],
+        summary_hits: list[ScoredId] | None = None,
+        caption_hits: list[ScoredId] | None = None,
     ) -> dict[str, object]:
         return {
             "raw_vector_hits": RetrieveEvidenceUseCase._serialize_scored_ids(raw_hits),
+            "summary": RetrieveEvidenceUseCase._serialize_scored_ids(summary_hits or []),
+            "caption": RetrieveEvidenceUseCase._serialize_scored_ids(caption_hits or []),
             "reranked_hits": [
                 {
                     "asset_id": hit.asset_id,

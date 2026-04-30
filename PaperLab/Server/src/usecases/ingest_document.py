@@ -15,13 +15,15 @@ from domain import (
     Document,
     DocumentAsset,
     DocumentAssetRepository,
-    DocumentProfile,
     DocumentStatus,
     DocumentType,
     DocumentRepository,
     EmbeddingProvider,
     VectorStore,
 )
+from indexing.asset_indexer import AssetIndexer
+from indexing.chunk_indexer import ChunkIndexer
+from indexing.document_indexer import DocumentIndexer
 
 
 @dataclass(slots=True)
@@ -269,10 +271,12 @@ class IngestDocumentUseCase:
             assets: 视觉资产列表。
         """
 
-        profile = self._build_document_profile(document, chunks, assets)
-
+        document_indexer = DocumentIndexer(
+            embedding_provider=self.embedding_provider,
+            vector_store=self.vector_store,
+        )
+        profile = document_indexer.build_profile(document, chunks, assets)
         document_title_vectors = self.embedding_provider.embed_texts([profile.title])
-        document_summary_vectors = self.embedding_provider.embed_texts([profile.summary])
         vector_size = len(document_title_vectors[0])
 
         if hasattr(self.vector_store, "ensure_chunk_collection"):
@@ -281,127 +285,17 @@ class IngestDocumentUseCase:
                 title_vector_size=vector_size,
                 summary_vector_size=vector_size,
             )
-        if hasattr(self.vector_store, "ensure_document_collection"):
-            self.vector_store.ensure_document_collection(
-                title_vector_size=vector_size,
-                summary_vector_size=vector_size,
-            )
-        if hasattr(self.vector_store, "ensure_asset_collection"):
-            self.vector_store.ensure_asset_collection(
-                caption_vector_size=vector_size,
-                summary_vector_size=vector_size,
-            )
+        document_indexer.index_profile(profile)
 
-        if hasattr(self.vector_store, "upsert_document_profiles"):
-            self.vector_store.upsert_document_profiles(
-                profiles=[profile],
-                title_vectors=document_title_vectors,
-                summary_vectors=document_summary_vectors,
-            )
+        ChunkIndexer(
+            embedding_provider=self.embedding_provider,
+            vector_store=self.vector_store,
+        ).index_chunks(document=document, chunks=chunks)
 
-        if chunks and hasattr(self.vector_store, "upsert_chunk_vectors"):
-            chunk_content_texts = [chunk.text for chunk in chunks]
-            chunk_title_texts = [chunk.section or document.title for chunk in chunks]
-            chunk_summary_texts = [self._summarize_chunk(chunk.text) for chunk in chunks]
-            self.vector_store.upsert_chunk_vectors(
-                chunks=chunks,
-                content_vectors=self.embedding_provider.embed_texts(chunk_content_texts),
-                title_vectors=self.embedding_provider.embed_texts(chunk_title_texts),
-                summary_vectors=self.embedding_provider.embed_texts(chunk_summary_texts),
-            )
-
-        if assets and hasattr(self.vector_store, "upsert_assets"):
-            asset_caption_texts = [asset.caption or asset.asset_label or asset.file_name for asset in assets]
-            asset_summary_texts = [asset.summary or asset.caption or asset.asset_type for asset in assets]
-            self.vector_store.upsert_assets(
-                assets=assets,
-                caption_vectors=self.embedding_provider.embed_texts(asset_caption_texts),
-                summary_vectors=self.embedding_provider.embed_texts(asset_summary_texts),
-            )
-
-    def _build_document_profile(
-        self,
-        document: Document,
-        chunks: list[Chunk],
-        assets: list[DocumentAsset],
-    ) -> DocumentProfile:
-        """Build a retrieval-oriented document profile from parsed results.
-
-        Args:
-            document: 文档对象。
-            chunks: 文本分块列表。
-            assets: 视觉资产列表。
-
-        Returns:
-            DocumentProfile: 文档级检索画像。
-        """
-
-        chunk_preview = " ".join(chunk.text.strip() for chunk in chunks[:3]).strip()
-        asset_labels = [asset.asset_label or asset.asset_type for asset in assets[:5] if asset.asset_label or asset.asset_type]
-        summary_parts = [part for part in [chunk_preview[:1200], "; ".join(asset_labels)] if part]
-        keywords = self._extract_profile_keywords(document, chunks, assets)
-        return DocumentProfile(
-            document_id=document.id,
-            project_id=document.project_id,
-            title=document.title,
-            summary=" ".join(summary_parts).strip(),
-            keywords=keywords,
-            file_name=document.file_name,
-            path=document.path,
-            metadata={
-                "chunk_count": len(chunks),
-                "asset_count": len(assets),
-            },
-        )
-
-    @staticmethod
-    def _summarize_chunk(text: str, max_chars: int = 320) -> str:
-        """Build a lightweight summary text for one chunk."""
-
-        normalized = " ".join(text.split())
-        return normalized[:max_chars]
-
-    @staticmethod
-    def _extract_profile_keywords(
-        document: Document,
-        chunks: list[Chunk],
-        assets: list[DocumentAsset],
-    ) -> list[str]:
-        """Extract a small keyword list for one document profile."""
-
-        candidates: list[str] = []
-        seen: set[str] = set()
-
-        for token in document.title.split():
-            normalized = token.strip(" ,.;:()[]{}").lower()
-            if len(normalized) < 3 or normalized in seen:
-                continue
-            candidates.append(normalized)
-            seen.add(normalized)
-            if len(candidates) >= 5:
-                break
-
-        for asset in assets:
-            for keyword in asset.keywords:
-                normalized = keyword.lower()
-                if normalized in seen:
-                    continue
-                candidates.append(normalized)
-                seen.add(normalized)
-                if len(candidates) >= 10:
-                    return candidates
-
-        for chunk in chunks[:5]:
-            for token in chunk.text.split():
-                normalized = token.strip(" ,.;:()[]{}").lower()
-                if len(normalized) < 5 or normalized in seen:
-                    continue
-                candidates.append(normalized)
-                seen.add(normalized)
-                if len(candidates) >= 10:
-                    return candidates
-
-        return candidates
+        AssetIndexer(
+            embedding_provider=self.embedding_provider,
+            vector_store=self.vector_store,
+        ).index_assets(assets)
 
     @staticmethod
     def _compute_content_hash(path: Path) -> str:

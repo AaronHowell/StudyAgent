@@ -62,6 +62,7 @@ class Settings:
     retrieval_chunk_recall_k: int = 20
     retrieval_asset_recall_k: int = 12
     retrieval_chunk_rerank_neighbor_window: int = 1
+    multimodal_send_image_blocks: bool = False
 
     @staticmethod
     def _env(*names: str, default: str) -> str:
@@ -152,6 +153,11 @@ class Settings:
                 "PAPERLAB_RETRIEVAL_CHUNK_RERANK_NEIGHBOR_WINDOW",
                 "STUDY_AGENT_RETRIEVAL_CHUNK_RERANK_NEIGHBOR_WINDOW",
                 1,
+            ),
+            multimodal_send_image_blocks=cls._bool_env(
+                "PAPERLAB_MULTIMODAL_SEND_IMAGE_BLOCKS",
+                "STUDY_AGENT_MULTIMODAL_SEND_IMAGE_BLOCKS",
+                False,
             ),
         )
 

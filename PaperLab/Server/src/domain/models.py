@@ -203,6 +203,18 @@ class Citation:
 
 
 @dataclass(slots=True)
+class AssetCitation:
+    """A lightweight pointer back to one visual asset source."""
+
+    asset_id: str
+    document_id: str
+    document_title: str
+    page: int | None = None
+    label: str = ""
+    locator: str = ""
+
+
+@dataclass(slots=True)
 class ScoredId:
     """One vector-search hit that only contains a business id and score."""
 
@@ -335,6 +347,7 @@ class EvidencePack:
     image_chunks: list[Chunk] = field(default_factory=list)
     web_snippets: list[Chunk] = field(default_factory=list)
     citations: list[Citation] = field(default_factory=list)
+    asset_citations: list[AssetCitation] = field(default_factory=list)
 
 
 @dataclass(slots=True)
