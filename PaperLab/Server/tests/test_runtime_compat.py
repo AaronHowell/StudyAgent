@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from api import config as api_config
+from configs.settings import agent_settings, api_settings
+from configs.settings.api_settings import Settings
 from integrations.storage.mem0_memory_store import Mem0MemoryStore
 from runtime import settings as runtime_settings
 from runtime.settings import AgentSettings
@@ -66,17 +68,38 @@ class RuntimeCompatTest(unittest.TestCase):
         self.assertEqual(settings.qdrant_document_collection_name, "legacy_documents")
         self.assertEqual(settings.llm_model, "demo-model")
 
+    def test_api_and_agent_settings_share_base_environment_parsing(self) -> None:
+        env = {
+            "PAPERLAB_MYSQL_HOST": "shared-mysql",
+            "PAPERLAB_QDRANT_URL": "http://shared-qdrant:6333",
+            "PAPERLAB_LLM_MODEL": "shared-model",
+            "PAPERLAB_API_PORT": "8123",
+            "PAPERLAB_AGENT_LOOP_MAX_STEPS": "9",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            api = Settings.from_env()
+            agent = AgentSettings.from_env()
+
+        self.assertEqual(api.mysql_host, "shared-mysql")
+        self.assertEqual(agent.mysql_host, "shared-mysql")
+        self.assertEqual(api.qdrant_url, "http://shared-qdrant:6333")
+        self.assertEqual(agent.qdrant_url, "http://shared-qdrant:6333")
+        self.assertEqual(api.llm_model, "shared-model")
+        self.assertEqual(agent.llm_model, "shared-model")
+        self.assertEqual(api.port, 8123)
+        self.assertEqual(agent.agent_loop_max_steps, 9)
+
     def test_api_config_loads_only_server_env_file(self) -> None:
-        with patch("api.config.Path.exists", return_value=True), patch("api.config.load_dotenv") as load_dotenv:
-            api_config._load_env_files()
+        with patch("configs.settings.base.Path.exists", return_value=True), patch("configs.settings.base.load_dotenv") as load_dotenv:
+            api_settings._load_env_files()
 
         self.assertEqual(load_dotenv.call_count, 1)
         self.assertTrue(str(load_dotenv.call_args.args[0]).endswith("PaperLab\\Server\\.env"))
         self.assertEqual(load_dotenv.call_args.kwargs, {"override": True})
 
     def test_runtime_settings_loads_only_server_env_file(self) -> None:
-        with patch("runtime.settings.Path.exists", return_value=True), patch("runtime.settings.load_dotenv") as load_dotenv:
-            runtime_settings._load_env_files()
+        with patch("configs.settings.base.Path.exists", return_value=True), patch("configs.settings.base.load_dotenv") as load_dotenv:
+            agent_settings._load_env_files()
 
         self.assertEqual(load_dotenv.call_count, 1)
         self.assertTrue(str(load_dotenv.call_args.args[0]).endswith("PaperLab\\Server\\.env"))

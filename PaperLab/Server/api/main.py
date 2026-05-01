@@ -56,7 +56,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         if get_services.cache_info().currsize:
-            get_services().ingestion_task_manager.shutdown(wait=False)
+            get_services().ingestion_task_manager.shutdown(wait=True) #把文档入库的任务进行终端
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

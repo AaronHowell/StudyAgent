@@ -24,6 +24,6 @@ def main() -> int:
     command = [sys.executable, "-m", "uvicorn", "api.main:app", "--reload"]
     return subprocess.call(command, cwd=str(ROOT), env=_build_env())
 
-
+# Build 项目环境变量，避免模块导入问题
 if __name__ == "__main__":
     raise SystemExit(main())
