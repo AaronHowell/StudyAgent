@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
+import json
 import re
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -42,6 +43,7 @@ class PdfParseConfig:
 
     Attributes:
         title_line_window: 首页参与标题候选的最大行数。
+        title_llm_page_count: 发送给 LLM 抽取标题的首页页数。
         max_title_length: 标题候选允许的最大长度。
         fallback_render_margin: 区域回退渲染时在目标矩形周围增加的边距像素。
         fallback_render_scale: 区域回退渲染的缩放倍率。
@@ -59,6 +61,7 @@ class PdfParseConfig:
     """
 
     title_line_window: int = 20
+    title_llm_page_count: int = 2
     max_title_length: int = 300
     fallback_render_margin: int = 8
     fallback_render_scale: float = 2.0
@@ -89,12 +92,14 @@ class PdfParser:
         self,
         extracted_asset_root: Path | None = None,
         config: PdfParseConfig | None = None,
+        title_extractor: object | None = None,
     ) -> None:
         """Create one PDF parser instance.
 
         Args:
             extracted_asset_root: 导出视觉资产时使用的缓存根目录。
             config: 解析配置对象；未提供时使用默认启发式参数。
+            title_extractor: 可选 LLM provider，需支持 `generate(prompt) -> str`。
         """
 
         self.extracted_asset_root = (
@@ -103,6 +108,7 @@ class PdfParser:
             else Path("PaperLabCache/pdf_images")
         )
         self.config = config or PdfParseConfig()
+        self.title_extractor = title_extractor
 
     def parse_pdf_metadata(self, path: Path) -> dict[str, object]:
         """Extract lightweight PDF metadata for later document enrichment.
@@ -120,6 +126,9 @@ class PdfParser:
         reader = self._open_reader(path)
         metadata = reader.metadata or {}
         extracted_title = self._extract_title_from_metadata(metadata)
+
+        if not extracted_title:
+            extracted_title = self._extract_title_with_llm(reader)
 
         if not extracted_title:
             extracted_title = self._extract_title_from_first_page(reader)
@@ -366,6 +375,92 @@ class PdfParser:
         if self._looks_like_bad_title(candidate):
             return None
         return candidate
+
+    def _extract_title_with_llm(self, reader: PdfReader) -> str | None:
+        """Ask an optional LLM extractor to identify the paper title from early pages.
+
+        作用:
+            当 PDF metadata 没有可信标题时，把前几页文本交给可选 LLM 提取器。
+            该能力是增强路径，任何异常或低质量返回都会回退到启发式规则。
+
+        Args:
+            reader: 已打开的 PDF 读取器。
+
+        Returns:
+            str | None: LLM 返回的可信标题；不可用时返回 `None`。
+        """
+
+        if self.title_extractor is None:
+            return None
+        generate = getattr(self.title_extractor, "generate", None)
+        if not callable(generate):
+            return None
+
+        page_texts: list[str] = []
+        for page in reader.pages[: self.config.title_llm_page_count]:
+            raw_text = page.extract_text() or ""
+            normalized_text = self.normalize_page_text(raw_text)
+            if normalized_text:
+                page_texts.append(normalized_text)
+
+        if not page_texts:
+            return None
+
+        prompt = self._build_title_extraction_prompt("\n\n".join(page_texts))
+        try:
+            response = str(generate(prompt) or "")
+        except Exception:
+            return None
+
+        candidate = self._parse_title_extraction_response(response)
+        if not candidate:
+            return None
+        if self._looks_like_bad_title(candidate):
+            return None
+        return candidate[: self.config.max_title_length]
+
+    def _build_title_extraction_prompt(self, first_pages_text: str) -> str:
+        """Build the prompt used for optional LLM title extraction."""
+
+        return (
+            "Extract the exact academic paper title from the following PDF text. "
+            "Use only the provided text. Ignore conference names, authors, affiliations, "
+            "abstract headings, page headers, footers, and section titles. Return only JSON "
+            'with this shape: {"title": "..."}. If no title is present, return {"title": ""}.\n\n'
+            f"<pdf_text>\n{first_pages_text[:8000]}\n</pdf_text>"
+        )
+
+    def _parse_title_extraction_response(self, response: str) -> str | None:
+        """Parse a title from the LLM response, preferring JSON but tolerating plain text."""
+
+        cleaned = response.strip()
+        if not cleaned:
+            return None
+
+        json_payload = self._extract_json_object(cleaned)
+        if json_payload:
+            try:
+                parsed = json.loads(json_payload)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                title = str(parsed.get("title") or "").strip()
+                return re.sub(r"\s+", " ", title) or None
+
+        cleaned = cleaned.strip("`").strip()
+        cleaned = re.sub(r"^title\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = cleaned.strip("\"'")
+        return re.sub(r"\s+", " ", cleaned) or None
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str | None:
+        """Return the first likely JSON object from one model response."""
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        return text[start : end + 1]
 
     def _extract_title_from_first_page(self, reader: PdfReader) -> str | None:
         """Fallback title extraction based on the first non-empty page lines.
