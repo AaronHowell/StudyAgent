@@ -45,10 +45,30 @@ class ApiServices:
     ingestion_task_manager: IngestionTaskManager
 
 
+def _build_pdf_parser(resolved_settings: Settings) -> PdfParser:
+    """Build the PDF parser with optional LLM-assisted title extraction."""
+
+    return PdfParser(title_extractor=_build_llm_provider(resolved_settings))
+
+
+def _build_llm_provider(resolved_settings: Settings) -> OpenAICompatibleLLMProvider | None:
+    """Build an OpenAI-compatible LLM provider when enough settings are present."""
+
+    if not resolved_settings.llm_model or not resolved_settings.llm_base_url:
+        return None
+    return OpenAICompatibleLLMProvider(
+        OpenAICompatibleLLMConfig(
+            base_url=resolved_settings.llm_base_url,
+            api_key=resolved_settings.llm_api_key,
+            model=resolved_settings.llm_model,
+        )
+    )
+
+
 @lru_cache(maxsize=1)
 def get_services() -> ApiServices:
-    document_scanner = LocalDocumentScanner()
-    pdf_parser = PdfParser()
+    pdf_parser = _build_pdf_parser(settings)
+    document_scanner = LocalDocumentScanner(pdf_parser=pdf_parser)
     mysql_config = MySQLConnectionConfig(
         host=settings.mysql_host,
         port=settings.mysql_port,
@@ -78,14 +98,7 @@ def get_services() -> ApiServices:
             )
         )
 
-    if settings.llm_model and settings.llm_base_url:
-        llm_provider = OpenAICompatibleLLMProvider(
-            OpenAICompatibleLLMConfig(
-                base_url=settings.llm_base_url,
-                api_key=settings.llm_api_key,
-                model=settings.llm_model,
-            )
-        )
+    llm_provider = _build_llm_provider(settings)
 
     if settings.qdrant_url:
         parsed_qdrant_url = urlparse(settings.qdrant_url)
