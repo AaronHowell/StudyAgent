@@ -25,6 +25,7 @@ export function ChatPanel({
   contextLabel,
   compact = false,
   showThreadSidebar = false,
+  collapseButton,
 }: {
   projectId: string;
   title: string;
@@ -33,6 +34,7 @@ export function ChatPanel({
   contextLabel?: string;
   compact?: boolean;
   showThreadSidebar?: boolean;
+  collapseButton?: React.ReactNode;
 }) {
   const [draft, setDraft] = useState("");
   const [interventionDraft, setInterventionDraft] = useState("");
@@ -181,6 +183,7 @@ export function ChatPanel({
             {contextLabel ? <span className="chat-context-tag">{contextLabel}</span> : null}
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {collapseButton}
             <button className="btn btn-ghost btn-sm" onClick={() => setShowSummaries((c) => !c)}>
               {showSummaries ? "隐藏摘要" : "摘要"}
             </button>

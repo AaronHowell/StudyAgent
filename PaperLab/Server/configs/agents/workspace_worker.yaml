@@ -1,6 +1,0 @@
-role: workspace
-long_term_memory: false
-short_term_compression: true
-capabilities:
-  - filesystem
-  - sandbox

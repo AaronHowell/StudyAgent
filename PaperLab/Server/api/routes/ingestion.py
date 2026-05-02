@@ -1,3 +1,4 @@
+"""用于管理后台入库的服务，并且提供一个查询接口 """
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -40,7 +41,9 @@ def to_ingestion_task_summary(task_id: str) -> IngestionTaskSummary:
 
 @router.post("/documents/ingest", response_model=IngestDocumentResponse)
 def ingest_document(payload: IngestDocumentRequest) -> IngestDocumentResponse:
-    """Queue one local document for background ingestion."""
+    """Queue one local document for background ingestion.
+    给定一个路径，将其尝试入库
+    """
 
     document_path = Path(payload.path).expanduser().resolve()
     if not document_path.exists():
@@ -52,21 +55,21 @@ def ingest_document(payload: IngestDocumentRequest) -> IngestDocumentResponse:
 
 @router.get("/documents/ingest/{task_id}", response_model=IngestionTaskSummary)
 def get_ingestion_task(task_id: str) -> IngestionTaskSummary:
-    """Return current status for one background ingestion task."""
+    """Return current status for one background ingestion task.查询当前入库任务的状态"""
 
     return to_ingestion_task_summary(task_id)
 
 
 @router.get("/documents/ingest", response_model=list[IngestionTaskSummary])
 def list_ingestion_tasks() -> list[IngestionTaskSummary]:
-    """Return recent ingestion tasks for the desktop UI."""
+    """Return recent ingestion tasks for the desktop UI.查询最近的所有入库任务"""
 
     return [to_ingestion_task_summary(task.id) for task in get_services().ingestion_task_manager.list_recent()]
 
 
 @router.post("/documents/ingest/batch", response_model=BatchIngestDocumentsResponse)
 def batch_ingest_documents(payload: BatchIngestDocumentsRequest) -> BatchIngestDocumentsResponse:
-    """Queue multiple documents for background ingestion."""
+    """Queue multiple documents for background ingestion.批量提交多篇论文"""
 
     tasks = []
     for raw_path in payload.paths:

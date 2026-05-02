@@ -278,3 +278,27 @@ class IngestionTaskManager:
             "retryable": False,
         }
 
+    """
+    Lightweight in-process ingestion queue for the desktop API.
+
+    这个类负责把耗时的论文入库流程从 HTTP 请求中拆出来，放到后台线程执行。
+    前端提交入库后会立即拿到 task_id，后续通过 task_id 轮询任务状态。
+
+    它维护三类内存状态：
+    - _tasks: task_id -> IngestionTask，用于保存任务状态，供前端查询。
+    - _active_by_key: project_id + path -> task_id，用于防止同一篇论文重复入库。
+    - _timers: task_id -> Timer，用于给任务设置 soft timeout。
+
+    ThreadPoolExecutor 用于在当前 FastAPI 进程内执行后台线程。
+    这不是子进程，也不是分布式任务队列。
+    它主要用于避免长时间入库阻塞 HTTP 请求，而不是解决 CPU 密集任务的并行加速。
+
+    self._lock 是 manager 级别的全局互斥锁，用来保护 _tasks、_active_by_key、
+    _timers 等共享内存结构，避免多个线程同时读写造成竞态。
+
+    后台线程中的异常不会被 FastAPI 全局异常处理器捕获，因此 _run_task 会自己
+    捕获异常，并通过 _classify_error 转换成 task.state = "failed" 以及
+    error_code / retryable / error_message 等字段，供前端轮询展示。
+
+    使用一个Lock() 来对整个
+    """

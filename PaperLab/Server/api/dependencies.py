@@ -1,4 +1,4 @@
-"""API dependency assembly for PaperLab routes."""
+"""API dependency assembly for PaperLab routes. 外部依赖，用来统一处理FastAPI中对外需求的服务"""
 
 from __future__ import annotations
 

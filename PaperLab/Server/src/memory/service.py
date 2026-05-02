@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from domain import MemoryType
@@ -16,6 +17,9 @@ try:
     from langchain_core.messages import BaseMessage
 except ImportError:  # pragma: no cover
     BaseMessage = Any  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 
 def _message_text(content: Any) -> str:
@@ -69,16 +73,22 @@ class MemoryService:
         if not profile.long_term_enabled or self.backend is None:
             return MemoryRecallResult(summary="", hits=[])
 
-        hits = self.backend.search(query, project_id=project_id, limit=limit)
+        try:
+            hits = self.backend.search(query, project_id=project_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Long-term memory recall failed; continuing without memory: %s", exc)
+            return MemoryRecallResult(summary="", hits=[])
         if hits:
             lines = ["Relevant memory:"]
             lines.extend(f"- {item.content}" for item in hits)
             return MemoryRecallResult(summary="\n".join(lines), hits=hits)
 
-        return MemoryRecallResult(
-            summary=self.backend.summarize_for_project(project_id),
-            hits=[],
-        )
+        try:
+            summary = self.backend.summarize_for_project(project_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Long-term memory summary failed; continuing without memory: %s", exc)
+            summary = ""
+        return MemoryRecallResult(summary=summary, hits=[])
 
     def store_turn(
         self,
@@ -95,16 +105,20 @@ class MemoryService:
         if not profile.long_term_enabled or self.backend is None:
             return False
 
-        self.backend.remember_messages(
-            project_id=project_id,
-            thread_id=thread_id,
-            messages=[
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": assistant_text},
-            ],
-            memory_type=memory_type,
-            metadata=metadata,
-        )
+        try:
+            self.backend.remember_messages(
+                project_id=project_id,
+                thread_id=thread_id,
+                messages=[
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": assistant_text},
+                ],
+                memory_type=memory_type,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Long-term memory store failed; continuing without persistence: %s", exc)
+            return False
         return True
 
     def build_short_term_context(

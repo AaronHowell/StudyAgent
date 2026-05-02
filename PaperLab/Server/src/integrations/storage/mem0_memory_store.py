@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from mem0 import Memory
 
+from configs import DEFAULT_PROJECT_ID
 from domain import MemoryItem, MemoryType
 
 
@@ -34,9 +36,10 @@ class Mem0MemoryStore:
             raise ValueError("Mem0MemoryStore requires either a client or a config.")
 
     def add(self, item: MemoryItem) -> None:
+        project_id = _required_entity_id(item.project_id, "project_id")
         self.client.add(
             [{"role": "system", "content": item.content}],
-            user_id=item.project_id,
+            user_id=project_id,
             metadata={
                 **item.metadata,
                 "memory_type": item.memory_type.value,
@@ -54,13 +57,15 @@ class Mem0MemoryStore:
         memory_type: MemoryType | str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[MemoryItem]:
+        resolved_project_id = _required_entity_id(project_id, "project_id")
+        resolved_thread_id = _optional_entity_id(thread_id)
         resolved_memory_type = (
             memory_type.value if isinstance(memory_type, MemoryType) else memory_type
         )
         result = self.client.add(
             messages,
-            user_id=project_id,
-            run_id=thread_id,
+            user_id=resolved_project_id,
+            run_id=resolved_thread_id,
             metadata={
                 **(metadata or {}),
                 **(
@@ -74,7 +79,7 @@ class Mem0MemoryStore:
         result_items = _unwrap_result_items(result)
         return [
             self._to_memory_item(
-                project_id,
+                resolved_project_id,
                 item,
                 fallback_metadata=(
                     {"memory_type": resolved_memory_type}
@@ -86,20 +91,24 @@ class Mem0MemoryStore:
         ]
 
     def search(self, query: str, project_id: str, limit: int = 5) -> list[MemoryItem]:
-        result = self.client.search(
+        resolved_project_id = _required_entity_id(project_id, "project_id")
+        result = _call_with_result_limit(
+            self.client.search,
+            limit,
             query,
-            top_k=limit,
-            filters={"user_id": project_id},
+            **_scope_kwargs(self.client.search, resolved_project_id),
         )
-        return [self._to_memory_item(project_id, item) for item in _unwrap_result_items(result)]
+        return [self._to_memory_item(resolved_project_id, item) for item in _unwrap_result_items(result)]
 
     def summarize_for_project(self, project_id: str) -> str:
+        resolved_project_id = _required_entity_id(project_id, "project_id")
         items = [
-            self._to_memory_item(project_id, item)
+            self._to_memory_item(resolved_project_id, item)
             for item in _unwrap_result_items(
-                self.client.get_all(
-                    filters={"user_id": project_id},
-                    top_k=10,
+                _call_with_result_limit(
+                    self.client.get_all,
+                    10,
+                    **_scope_kwargs(self.client.get_all, resolved_project_id),
                 )
             )
         ]
@@ -162,5 +171,34 @@ def _unwrap_result_items(result: Any) -> list[Any]:
     if isinstance(result, list):
         return result
     return []
+
+
+def _call_with_result_limit(method: Any, limit: int, *args: Any, **kwargs: Any) -> Any:
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    limit_name = "top_k" if "top_k" in parameters else "limit"
+    return method(*args, **kwargs, **{limit_name: limit})
+
+
+def _scope_kwargs(method: Any, project_id: str) -> dict[str, Any]:
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "user_id" in parameters:
+        return {"user_id": project_id}
+    return {"filters": {"user_id": project_id}}
+
+
+def _required_entity_id(value: Any, name: str) -> str:
+    resolved = str(value or "").strip()
+    return resolved or DEFAULT_PROJECT_ID
+
+
+def _optional_entity_id(value: Any) -> str | None:
+    resolved = str(value or "").strip()
+    return resolved or None
 
 

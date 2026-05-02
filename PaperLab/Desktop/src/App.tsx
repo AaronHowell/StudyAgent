@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
-import { BookOpen, MessageSquare, Beaker, AlertCircle } from "lucide-react";
+import { BookOpen, MessageSquare, AlertCircle } from "lucide-react";
 import { buildDocumentFileUrl } from "./PaperLabChatPanel";
 import type { DocumentImage, ScannedDocument } from "./types";
 import { useDocuments } from "./hooks/useDocuments";
 import { usePreferences } from "./hooks/usePreferences";
-import { useReproduction } from "./hooks/useReproduction";
 import { PaperLibrary } from "./components/library/PaperLibrary";
 import { PaperReader } from "./components/reader/PaperReader";
 import { ChatPanel } from "./components/chat/ChatPanel";
-import { ReproductionPanel } from "./components/agent/ReproductionPanel";
 import { ContextMenu, ContextMenuItem } from "./components/common/ContextMenu";
 import { GalleryModal } from "./components/common/GalleryModal";
 
@@ -21,7 +19,6 @@ type GalleryImage = DocumentImage & { preview_url: string };
 function App() {
   const { rootPath, projectId, setRootPath, setProjectId } = usePreferences();
   const docs = useDocuments();
-  const repro = useReproduction();
 
   const [workspace, setWorkspace] = useState<WorkspaceView>("paper");
   const [paperView, setPaperView] = useState<PaperView>("library");
@@ -31,7 +28,6 @@ function App() {
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [galleryLoading, setGalleryLoading] = useState(false);
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
-  const [reproductionObjective, setReproductionObjective] = useState("尽可能复现当前论文，生成最小可运行代码和报告");
 
   const [contextMenu, setContextMenu] = useState<{
     visible: boolean; x: number; y: number; document: ScannedDocument | null;
@@ -257,34 +253,19 @@ function App() {
           )
         ) : (
           /* AI workspace */
-          <div className="layout-with-sidebar">
-            {/* Left sidebar: reproduction panel */}
-            <div className="sidebar" style={{ width: 300, overflowY: "auto" }}>
-              <ReproductionPanel
-                run={repro.run}
-                loading={repro.loading}
-                objective={reproductionObjective}
-                onObjectiveChange={setReproductionObjective}
-                onStart={() => void repro.start(projectId, reproductionObjective, selectedDocument ? [selectedDocument.id] : [])}
-                onRefresh={() => void repro.refresh()}
-                onPause={() => void repro.pause()}
-                onResume={() => void repro.resume()}
-                onCancel={() => void repro.cancel()}
-                hasDocument={!!selectedDocument}
-              />
-            </div>
-
-            {/* Main: chat */}
-            <div className="main-content" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-              <ChatPanel
-                projectId={projectId}
-                title="AI 对话"
-                description="解释论文、比较方法、规划复现步骤，都在同一个流式对话面板里完成。"
-                placeholder="输入问题，或要求 AI 帮你做分析与复现规划"
-                contextLabel={selectedDocument ? `当前选中论文：${selectedDocument.title}` : "当前未锁定具体论文"}
-                showThreadSidebar
-              />
-            </div>
+          <div className="ai-workspace">
+            <ChatPanel
+              projectId={projectId}
+              title="AI 对话"
+              description="解释论文、比较方法、规划复现步骤，都在同一个流式对话面板里完成。"
+              placeholder="输入问题，或要求 AI 帮你做分析、比较方法或规划复现"
+              contextLabel={
+                selectedDocument
+                  ? `当前选中论文：${selectedDocument.title} — 可直接在对话中要求复现`
+                  : "未锁定论文 — 选择论文后可在对话中要求复现"
+              }
+              showThreadSidebar
+            />
           </div>
         )}
       </div>

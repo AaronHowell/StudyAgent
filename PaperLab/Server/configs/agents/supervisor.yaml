@@ -1,7 +1,0 @@
-role: supervisor
-long_term_memory: true
-short_term_compression: true
-parallel_workers:
-  - retriever
-  - tool
-  - workspace

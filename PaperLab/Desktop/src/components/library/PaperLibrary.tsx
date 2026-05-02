@@ -62,7 +62,7 @@ export function PaperLibrary({
   return (
     <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
       {/* Sidebar */}
-      <div className="sidebar">
+      <div className="sidebar sidebar-bottom">
         <div className="sidebar-section">
           <span className="sidebar-section-title">项目</span>
           <div style={{ padding: "4px 8px" }}>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from datetime import UTC
@@ -32,6 +33,8 @@ from api.chat_turns import build_assistant_turn_payload
 from api.chat_turns import build_turns_from_messages
 from api.chat_turns import serialize_trace_message_event
 from api.config import Settings
+from configs import DEFAULT_PROJECT_ID
+from configs import DEFAULT_THREAD_ID
 from orchestration.supervisor import graph
 from session_storage import SessionCheckpoint
 from session_storage import SessionStorageService
@@ -39,6 +42,7 @@ from session_storage import SessionStorageService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 session_router = APIRouter(tags=["sessions"])
+logger = logging.getLogger("uvicorn.error")
 
 
 @lru_cache(maxsize=1)
@@ -50,10 +54,12 @@ def get_session_storage() -> SessionStorageService:
 
 
 def _thread_config(*, project_id: str, thread_id: str) -> dict[str, Any]:
+    resolved_project_id = str(project_id or "").strip() or DEFAULT_PROJECT_ID
+    resolved_thread_id = str(thread_id or "").strip() or DEFAULT_THREAD_ID
     return {
         "configurable": {
-            "project_id": project_id,
-            "thread_id": thread_id,
+            "project_id": resolved_project_id,
+            "thread_id": resolved_thread_id,
         }
     }
 
@@ -471,6 +477,7 @@ async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
             if payload.interrupt is not None:
                 yield _sse_frame("interrupt", payload.interrupt.model_dump())
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Chat stream failed.")
             yield _sse_frame("error", {"message": str(exc)})
 
     return StreamingResponse(

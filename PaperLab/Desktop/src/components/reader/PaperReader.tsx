@@ -1,9 +1,8 @@
-import { ArrowLeft, ImageIcon } from "lucide-react";
+import { useState } from "react";
+import { ArrowLeft, ImageIcon, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import type { ScannedDocument } from "../../types";
 import { PdfViewer } from "./PdfViewer";
 import { ChatPanel } from "../chat/ChatPanel";
-
-const apiBase = import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export function PaperReader({
   document,
@@ -22,26 +21,37 @@ export function PaperReader({
   onClose: () => void;
   onOpenGallery: () => void;
 }) {
+  const [notesOpen, setNotesOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(true);
+
+  const gridCols = notesOpen && chatOpen
+    ? "260px 1fr 380px"
+    : notesOpen
+      ? "260px 1fr 40px"
+      : chatOpen
+        ? "40px 1fr 380px"
+        : "40px 1fr 40px";
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+    <div className="reader-container">
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px", borderBottom: "1px solid var(--border)", background: "var(--surface)", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <button className="btn btn-ghost btn-icon" onClick={onClose} title="返回论文库">
+      <div className="reader-header">
+        <div className="reader-header-left">
+          <button className="btn btn-ghost btn-icon" type="button" onClick={onClose} title="返回论文库">
             <ArrowLeft size={16} />
           </button>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div className="reader-header-info">
+            <div className="reader-header-title">
               {document?.title || "论文阅读"}
             </div>
-            <div style={{ fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div className="reader-header-path">
               {document?.path || ""}
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 4 }}>
+        <div className="reader-header-actions">
           {document ? (
-            <button className="btn btn-ghost btn-sm" onClick={onOpenGallery}>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={onOpenGallery}>
               <ImageIcon size={14} />
               图像画廊
             </button>
@@ -50,25 +60,34 @@ export function PaperReader({
       </div>
 
       {/* 3-column layout: notes | pdf | chat */}
-      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr 380px", flex: 1, minHeight: 0 }}>
+      <div className="reader-body" style={{ gridTemplateColumns: gridCols }}>
         {/* Notes panel */}
-        <div style={{ borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--sidebar-bg)" }}>
-          <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-            <span style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-tertiary)" }}>
-              论文笔记
-            </span>
+        {notesOpen ? (
+          <div className="reader-notes-panel">
+            <div className="reader-notes-header">
+              <span className="reader-notes-label">论文笔记</span>
+              <button className="btn btn-ghost btn-icon btn-xs" type="button" onClick={() => setNotesOpen(false)} title="收起笔记">
+                <PanelLeftClose size={14} />
+              </button>
+            </div>
+            <textarea
+              className="textarea"
+              value={note}
+              onChange={(e) => onNoteChange(e.target.value)}
+              placeholder="记录论文贡献、问题、复现思路..."
+              style={{ flex: 1, border: "none", borderRadius: 0, resize: "none", padding: 12, fontSize: 13, background: "transparent" }}
+            />
           </div>
-          <textarea
-            className="textarea"
-            value={note}
-            onChange={(e) => onNoteChange(e.target.value)}
-            placeholder="记录论文贡献、问题、复现思路..."
-            style={{ flex: 1, border: "none", borderRadius: 0, resize: "none", padding: 12, fontSize: 13, background: "transparent" }}
-          />
-        </div>
+        ) : (
+          <div className="reader-collapsed-strip">
+            <button className="btn btn-ghost btn-icon btn-xs" type="button" onClick={() => setNotesOpen(true)} title="展开笔记">
+              <PanelLeftOpen size={14} />
+            </button>
+          </div>
+        )}
 
         {/* PDF viewer */}
-        <div style={{ minWidth: 0, minHeight: 0 }}>
+        <div className="reader-pdf-area">
           {pdfUrl ? (
             <PdfViewer url={pdfUrl} />
           ) : (
@@ -80,15 +99,28 @@ export function PaperReader({
         </div>
 
         {/* Chat panel */}
-        <div style={{ borderLeft: "1px solid var(--border)", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <ChatPanel
-            projectId={projectId}
-            title="论文助手"
-            placeholder="输入你想让 AI 解释或分析的问题"
-            contextLabel={document ? `当前论文：${document.title}` : ""}
-            compact
-          />
-        </div>
+        {chatOpen ? (
+          <div className="reader-chat-panel">
+            <ChatPanel
+              projectId={projectId}
+              title="论文助手"
+              placeholder="输入你想让 AI 解释或分析的问题"
+              contextLabel={document ? `当前论文：${document.title}` : ""}
+              compact
+              collapseButton={
+                <button className="btn btn-ghost btn-icon btn-xs" type="button" onClick={() => setChatOpen(false)} title="收起助手">
+                  <PanelRightClose size={14} />
+                </button>
+              }
+            />
+          </div>
+        ) : (
+          <div className="reader-collapsed-strip">
+            <button className="btn btn-ghost btn-icon btn-xs" type="button" onClick={() => setChatOpen(true)} title="展开助手">
+              <PanelRightOpen size={14} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

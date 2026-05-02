@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +22,10 @@ from api.routes.ingestion import router as ingestion_router
 from api.routes.retrieval import router as retrieval_router
 from api.routes.runs import router as runs_router
 from api.schemas import SelectProjectFolderRequest, SelectProjectFolderResponse
+from configs import AgentSettings, Settings
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def _select_directory_path(current_path: str | None = None) -> str:
@@ -48,10 +54,67 @@ def _select_directory_path(current_path: str | None = None) -> str:
     return str(Path(selected).expanduser().resolve()) if selected else ""
 
 
+def _redis_target_from_url(url: str, *, fallback_host: str, fallback_port: int, fallback_db: int) -> tuple[str, int, int]:
+    if not url:
+        return fallback_host, fallback_port, fallback_db
+    parsed = urlparse(url)
+    return (
+        parsed.hostname or fallback_host,
+        parsed.port or fallback_port,
+        int(parsed.path.lstrip("/") or fallback_db),
+    )
+
+
+def _startup_config_summary(*, api_settings: Settings, agent_settings: AgentSettings) -> list[str]:
+    embedding_base_url = api_settings.embedding_base_url or api_settings.llm_base_url
+    embedding_model = api_settings.embedding_model or "(not configured)"
+    api_redis = (
+        f"{api_settings.redis_host}:{api_settings.redis_port}"
+        if api_settings.redis_host
+        else "disabled"
+    )
+    agent_redis = (
+        f"enabled {agent_settings.redis_host}:{agent_settings.redis_port} db={agent_settings.redis_db}"
+        if agent_settings.redis_enabled
+        else "disabled"
+    )
+    checkpoint_host, checkpoint_port, checkpoint_db = _redis_target_from_url(
+        agent_settings.checkpoint_redis_url,
+        fallback_host=agent_settings.redis_host,
+        fallback_port=agent_settings.redis_port,
+        fallback_db=agent_settings.redis_db,
+    )
+    checkpoint_redis = (
+        f"enabled {checkpoint_host}:{checkpoint_port} db={checkpoint_db}"
+        if agent_settings.checkpoint_redis_enabled
+        else "disabled"
+    )
+    return [
+        f"MySQL: {api_settings.mysql_host}:{api_settings.mysql_port}/{api_settings.mysql_database} user={api_settings.mysql_user}",
+        f"Qdrant: {api_settings.qdrant_url}",
+        f"LLM: provider={api_settings.llm_provider} base_url={api_settings.llm_base_url} model={api_settings.llm_model or '(not configured)'}",
+        f"Embedding: base_url={embedding_base_url} model={embedding_model}",
+        f"API Redis: {api_redis}",
+        f"Agent Redis: {agent_redis}",
+        f"Checkpoint Redis: {checkpoint_redis}",
+    ]
+
+
+def _log_startup_config() -> None:
+    agent_settings = AgentSettings.from_env()
+    logger.info("PaperLab backend startup configuration:")
+    for line in _startup_config_summary(
+        api_settings=settings,
+        agent_settings=agent_settings,
+    ):
+        logger.info("  %s", line)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Manage API lifecycle resources."""
 
+    _log_startup_config()
     try:
         yield
     finally:

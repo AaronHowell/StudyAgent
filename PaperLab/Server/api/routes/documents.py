@@ -159,7 +159,7 @@ def get_document_ingestion_status(
 
 @router.get("/documents/file")
 def get_document_file(path: str = Query(..., description="Absolute path to a local file")) -> FileResponse:
-    """Serve a local file for PDF preview or image preview."""
+    """Serve a local file for PDF preview or image preview. 为了让前端能够打开特定的PDF，把文件编辑编辑发一下给"""
 
     target_path = Path(path).expanduser().resolve()
     if not target_path.exists() or not target_path.is_file():
