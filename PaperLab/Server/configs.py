@@ -108,6 +108,7 @@ class BaseSettings:
     embedding_api_key: str = ""
     embedding_model: str = ""
     embedding_max_input_tokens: int = 480
+    multimodal_embedding_enabled: bool = False
     retrieval_debug_log_path: str = "logs/retrieval-debug.jsonl"
     retrieval_reranker_enabled: bool = False
     retrieval_reranker_base_url: str = ""
@@ -177,6 +178,11 @@ class BaseSettings:
             "embedding_api_key": cls._env("PAPERLAB_EMBEDDING_API_KEY", "STUDY_AGENT_EMBEDDING_API_KEY", default=""),
             "embedding_model": cls._env("PAPERLAB_EMBEDDING_MODEL", "STUDY_AGENT_EMBEDDING_MODEL", default=""),
             "embedding_max_input_tokens": cls._int_env("PAPERLAB_EMBEDDING_MAX_INPUT_TOKENS", "STUDY_AGENT_EMBEDDING_MAX_INPUT_TOKENS", 480),
+            "multimodal_embedding_enabled": cls._bool_env(
+                "PAPERLAB_MULTIMODAL_EMBEDDING_ENABLED",
+                "STUDY_AGENT_MULTIMODAL_EMBEDDING_ENABLED",
+                False,
+            ),
             "retrieval_debug_log_path": cls._env(
                 "PAPERLAB_RETRIEVAL_DEBUG_LOG_PATH",
                 "STUDY_AGENT_RETRIEVAL_DEBUG_LOG_PATH",

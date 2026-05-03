@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from configs import DEFAULT_PROJECT_ID
 from pydantic import BaseModel, Field
 
 
@@ -17,6 +18,7 @@ class ScanDocumentsRequest(BaseModel):
     """Request payload for scanning a local folder."""
 
     root_path: str = Field(..., description="Local folder path to scan")
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, description="Target project identifier")
 
 
 class SelectProjectFolderRequest(BaseModel):
@@ -56,6 +58,7 @@ class DocumentImagesRequest(BaseModel):
     """Request payload for extracting images from one document."""
 
     path: str = Field(..., description="Absolute path to one PDF document")
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, description="Target project identifier")
 
 
 class DocumentImageItem(BaseModel):
@@ -90,6 +93,7 @@ class DocumentIngestionStatusRequest(BaseModel):
     """Request payload for checking whether one document has been ingested."""
 
     path: str = Field(..., description="Absolute path to one local document")
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, description="Target project identifier")
 
 
 class DocumentIngestionStatusResponse(BaseModel):

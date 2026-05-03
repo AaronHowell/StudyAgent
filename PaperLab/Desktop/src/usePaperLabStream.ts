@@ -34,6 +34,7 @@ export type AssetCitationRecord = {
 };
 
 export type AssetSourceRecord = {
+  ref_id?: string;
   asset_id: string;
   document_id: string;
   page_number?: number | null;

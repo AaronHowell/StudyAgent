@@ -13,6 +13,7 @@ class TextEvidenceItem:
     ref_id: str
     chunk_id: str
     document_id: str
+    document_title: str
     page: int | None
     text: str
 
@@ -22,6 +23,7 @@ class ImageEvidenceItem:
     ref_id: str
     asset_id: str
     document_id: str
+    document_title: str
     page: int | None
     caption: str
     summary: str
@@ -52,11 +54,13 @@ def build_multimodal_context(
     Vision-model image blocks can be enabled by setting ``load_image_bytes``.
     """
 
+    document_title_by_id = {hit.document_id: hit.title for hit in evidence_pack.documents}
     text_items = [
         TextEvidenceItem(
             ref_id=f"C{index + 1}",
             chunk_id=hit.chunk_id,
             document_id=hit.document_id,
+            document_title=document_title_by_id.get(hit.document_id, hit.document_id),
             page=hit.page,
             text=hit.text,
         )
@@ -73,6 +77,7 @@ def build_multimodal_context(
                 ref_id=f"A{index + 1}",
                 asset_id=hit.asset_id,
                 document_id=hit.document_id,
+                document_title=document_title_by_id.get(hit.document_id, hit.document_id),
                 page=hit.page_number,
                 caption=hit.caption,
                 summary=hit.summary,

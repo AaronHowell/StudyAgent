@@ -81,7 +81,10 @@ class AnswerQuestionUseCase:
                     self._serialize_asset_citation(citation)
                     for citation in evidence_pack.asset_citations
                 ],
-                "asset_sources": [self._serialize_asset_source(hit) for hit in evidence_pack.assets],
+                "asset_sources": [
+                    self._serialize_asset_source(hit, ref_id=f"A{index + 1}")
+                    for index, hit in enumerate(evidence_pack.assets)
+                ],
             },
         )
 
@@ -103,8 +106,9 @@ class AnswerQuestionUseCase:
         return serialize_asset_citation(citation)
 
     @staticmethod
-    def _serialize_asset_source(hit) -> dict[str, object]:
+    def _serialize_asset_source(hit, *, ref_id: str) -> dict[str, object]:
         return {
+            "ref_id": ref_id,
             "asset_id": hit.asset_id,
             "document_id": hit.document_id,
             "page_number": hit.page_number,

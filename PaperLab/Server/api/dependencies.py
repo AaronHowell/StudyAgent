@@ -140,6 +140,7 @@ def get_services() -> ApiServices:
         chunk_builder=document_chunk_builder,
         embedding_provider=embedding_provider,
         vector_store=vector_store,
+        multimodal_embedding_enabled=settings.multimodal_embedding_enabled,
     )
     retrieve_evidence_use_case = None
     answer_question_use_case = None

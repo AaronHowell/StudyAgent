@@ -41,7 +41,7 @@ function App() {
 
   // Initial scan
   useEffect(() => {
-    if (rootPath) void docs.scan(rootPath);
+    if (rootPath) void docs.scan(rootPath, projectId);
   }, []);
 
   // Keyboard shortcuts
@@ -74,7 +74,7 @@ function App() {
       const payload = (await response.json()) as { path: string };
       if (!payload.path) return;
       setRootPath(payload.path);
-      await docs.scan(payload.path);
+      await docs.scan(payload.path, projectId);
     } catch (err) {
       docs.setError(err instanceof Error ? err.message : "选择项目目录失败");
     } finally {
@@ -120,7 +120,7 @@ function App() {
       const response = await fetch(`${apiBase}/documents/images`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: document.path }),
+        body: JSON.stringify({ path: document.path, project_id: projectId }),
       });
       if (!response.ok) throw new Error(await response.text());
       const payload = (await response.json()) as { images: DocumentImage[] };
@@ -235,7 +235,7 @@ function App() {
               onOpen={openReader}
               onIngest={(doc) => void docs.ingest(doc, projectId)}
               onBatchIngest={() => void docs.batchIngest(projectId)}
-              onScan={() => void docs.scan(rootPath)}
+              onScan={() => void docs.scan(rootPath, projectId)}
               onChooseFolder={() => void chooseProjectFolder()}
               choosingFolder={choosingFolder}
               onContextMenu={openContextMenu}

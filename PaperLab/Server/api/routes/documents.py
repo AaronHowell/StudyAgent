@@ -20,6 +20,7 @@ from api.schemas import (
     ScanDocumentsRequest,
     ScanDocumentsResponse,
 )
+from configs import DEFAULT_PROJECT_ID
 from domain import DocumentStatus, DocumentType
 
 router = APIRouter()
@@ -34,11 +35,18 @@ def is_document_ingested(document_id: str) -> bool:
         return False
 
 
+def resolve_project_id(project_id: str | None) -> str:
+    """Return the request project id or the shared application default."""
+
+    return (project_id or "").strip() or DEFAULT_PROJECT_ID
+
+
 @router.post("/documents/scan", response_model=ScanDocumentsResponse)
 def scan_documents(payload: ScanDocumentsRequest) -> ScanDocumentsResponse:
     """Scan a local folder and return discovered PDF documents."""
 
     root_path = Path(payload.root_path).expanduser().resolve()
+    project_id = resolve_project_id(payload.project_id)
     try:
         discovered_paths = get_services().document_scanner.scan_project_documents(root_path)
     except (FileNotFoundError, NotADirectoryError) as exc:
@@ -50,7 +58,7 @@ def scan_documents(payload: ScanDocumentsRequest) -> ScanDocumentsResponse:
             continue
 
         try:
-            document = get_services().document_scanner.build_document_record("frontend-project", path)
+            document = get_services().document_scanner.build_document_record(project_id, path)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to build document record: {exc}") from exc
 
@@ -83,7 +91,8 @@ def get_document_images(payload: DocumentImagesRequest) -> DocumentImagesRespons
         raise HTTPException(status_code=400, detail="Only PDF documents are supported for image extraction.")
 
     services = get_services()
-    document = services.document_scanner.build_document_record("frontend-project", pdf_path)
+    project_id = resolve_project_id(payload.project_id)
+    document = services.document_scanner.build_document_record(project_id, pdf_path)
     stored_document = services.document_repository.get_by_id(document.id)
     if stored_document is not None:
         images = services.asset_repository.list_by_document(stored_document.id)
@@ -146,7 +155,10 @@ def get_document_ingestion_status(
         raise HTTPException(status_code=404, detail=f"Document not found: {document_path}")
 
     try:
-        document = get_services().document_scanner.build_document_record("frontend-project", document_path)
+        document = get_services().document_scanner.build_document_record(
+            resolve_project_id(payload.project_id),
+            document_path,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to build document record: {exc}") from exc
 

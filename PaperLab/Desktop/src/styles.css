@@ -1045,6 +1045,11 @@ p { margin: 0; }
   background: var(--surface);
 }
 
+.inline-asset-reference {
+  margin: 8px 0;
+  max-width: 360px;
+}
+
 .asset-card img {
   width: 100%;
   height: 120px;
@@ -1694,4 +1699,3 @@ a:focus-visible {
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
-

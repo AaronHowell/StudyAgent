@@ -125,18 +125,27 @@ class PdfParser:
 
         reader = self._open_reader(path)
         metadata = reader.metadata or {}
+        llm_metadata: dict[str, object] = {}
         extracted_title = self._extract_title_from_metadata(metadata)
 
         if not extracted_title:
-            extracted_title = self._extract_title_with_llm(reader)
+            llm_metadata = self._extract_metadata_with_llm(reader)
+            extracted_title = self._normalize_metadata_value(llm_metadata.get("title"))
+            if extracted_title and self._looks_like_bad_title(extracted_title):
+                extracted_title = None
 
         if not extracted_title:
             extracted_title = self._extract_title_from_first_page(reader)
 
+        extracted_author = self._normalize_metadata_value(metadata.get("/Author"))
+        if not extracted_author:
+            extracted_author = self._build_author_from_llm_metadata(llm_metadata)
+
         return {
             "source_path": str(path.resolve()),
+            **llm_metadata,
             "title": extracted_title or path.stem,
-            "author": self._normalize_metadata_value(metadata.get("/Author")),
+            "author": extracted_author,
             "page_count": len(reader.pages),
         }
 
@@ -231,9 +240,12 @@ class PdfParser:
                     caption = self._select_caption(caption_candidates, image_index)
                     asset_kind, asset_label, asset_index = self._extract_asset_reference(caption)
                     nearby_text = self._extract_nearby_text(page_text, caption)
-                    summary = self._build_image_summary(caption, nearby_text, page_number)
-                    image_type = self._infer_asset_type(caption, nearby_text, asset_kind)
-                    keywords = self._extract_keywords(caption, nearby_text)
+                    asset_metadata = self._build_asset_metadata(
+                        caption=caption,
+                        nearby_text=nearby_text,
+                        page_number=page_number,
+                        asset_kind=asset_kind,
+                    )
 
                     if not self._should_keep_body_image(
                         width=width,
@@ -261,9 +273,9 @@ class PdfParser:
                             asset_label=asset_label,
                             asset_index=asset_index,
                             caption=caption,
-                            summary=summary,
-                            asset_type=image_type,
-                            keywords=keywords,
+                            summary=str(asset_metadata["summary"]),
+                            asset_type=str(asset_metadata["asset_type"]),
+                            keywords=list(asset_metadata["keywords"]),
                             related_chunk_ids=[],
                             media_type=self._guess_media_type(output_path),
                             byte_size=len(image_bytes),
@@ -376,25 +388,26 @@ class PdfParser:
             return None
         return candidate
 
-    def _extract_title_with_llm(self, reader: PdfReader) -> str | None:
-        """Ask an optional LLM extractor to identify the paper title from early pages.
+    def _extract_metadata_with_llm(self, reader: PdfReader) -> dict[str, object]:
+        """Ask an optional LLM extractor to identify paper metadata from early pages.
 
         作用:
-            当 PDF metadata 没有可信标题时，把前几页文本交给可选 LLM 提取器。
-            该能力是增强路径，任何异常或低质量返回都会回退到启发式规则。
+            当 PDF metadata 不完整时，把前几页文本交给可选 LLM 提取器。
+            该能力是增强路径，任何异常或低质量返回都会回退到 PDF metadata
+            和启发式规则。
 
         Args:
             reader: 已打开的 PDF 读取器。
 
         Returns:
-            str | None: LLM 返回的可信标题；不可用时返回 `None`。
+            dict[str, object]: LLM 返回并规范化后的 metadata；不可用时返回空字典。
         """
 
         if self.title_extractor is None:
-            return None
+            return {}
         generate = getattr(self.title_extractor, "generate", None)
         if not callable(generate):
-            return None
+            return {}
 
         page_texts: list[str] = []
         for page in reader.pages[: self.config.title_llm_page_count]:
@@ -404,53 +417,115 @@ class PdfParser:
                 page_texts.append(normalized_text)
 
         if not page_texts:
-            return None
+            return {}
 
-        prompt = self._build_title_extraction_prompt("\n\n".join(page_texts))
+        prompt = self._build_metadata_extraction_prompt("\n\n".join(page_texts))
         try:
             response = str(generate(prompt) or "")
         except Exception:
-            return None
+            return {}
 
-        candidate = self._parse_title_extraction_response(response)
-        if not candidate:
-            return None
-        if self._looks_like_bad_title(candidate):
-            return None
-        return candidate[: self.config.max_title_length]
+        return self._parse_metadata_extraction_response(response)
 
-    def _build_title_extraction_prompt(self, first_pages_text: str) -> str:
-        """Build the prompt used for optional LLM title extraction."""
+    def _build_metadata_extraction_prompt(self, first_pages_text: str) -> str:
+        """Build the prompt used for optional LLM metadata extraction."""
 
         return (
-            "Extract the exact academic paper title from the following PDF text. "
-            "Use only the provided text. Ignore conference names, authors, affiliations, "
-            "abstract headings, page headers, footers, and section titles. Return only JSON "
-            'with this shape: {"title": "..."}. If no title is present, return {"title": ""}.\n\n'
+            "Extract academic paper metadata from the following PDF text. "
+            "Use only the provided text from the first pages. Ignore page headers, footers, "
+            "navigation text, and unrelated boilerplate. Return only JSON with this shape: "
+            '{"title": "", "authors": [], "summary": "", "keywords": [], "venue": "", '
+            '"year": null}. Use empty strings, empty arrays, '
+            "Keep summary concise: one or two sentences, not the full abstract. "
+            "or null when a field is not present.\n\n"
             f"<pdf_text>\n{first_pages_text[:8000]}\n</pdf_text>"
         )
 
-    def _parse_title_extraction_response(self, response: str) -> str | None:
-        """Parse a title from the LLM response, preferring JSON but tolerating plain text."""
+    def _parse_metadata_extraction_response(self, response: str) -> dict[str, object]:
+        """Parse and normalize metadata from one LLM response."""
 
         cleaned = response.strip()
         if not cleaned:
-            return None
+            return {}
 
         json_payload = self._extract_json_object(cleaned)
-        if json_payload:
-            try:
-                parsed = json.loads(json_payload)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                title = str(parsed.get("title") or "").strip()
-                return re.sub(r"\s+", " ", title) or None
+        if not json_payload:
+            return {}
 
-        cleaned = cleaned.strip("`").strip()
-        cleaned = re.sub(r"^title\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
-        cleaned = cleaned.strip("\"'")
-        return re.sub(r"\s+", " ", cleaned) or None
+        try:
+            parsed = json.loads(json_payload)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        result: dict[str, object] = {}
+        title = self._normalize_metadata_value(parsed.get("title"))
+        if title and not self._looks_like_bad_title(title):
+            result["title"] = title[: self.config.max_title_length]
+
+        authors = self._normalize_metadata_list(parsed.get("authors"))
+        if authors:
+            result["authors"] = authors
+
+        summary = self._normalize_metadata_value(parsed.get("summary"))
+        if summary:
+            result["summary"] = summary
+
+        keywords = self._normalize_metadata_list(parsed.get("keywords"))
+        if keywords:
+            result["keywords"] = keywords
+
+        for key in ("venue",):
+            value = self._normalize_metadata_value(parsed.get(key))
+            if value:
+                result[key] = value
+
+        year = self._normalize_metadata_year(parsed.get("year"))
+        if year is not None:
+            result["year"] = year
+
+        return result
+
+    def _build_author_from_llm_metadata(self, metadata: dict[str, object]) -> str | None:
+        """Build the legacy author string from LLM authors when PDF metadata is empty."""
+
+        authors = metadata.get("authors")
+        if not isinstance(authors, list):
+            return None
+        normalized_authors = [str(author).strip() for author in authors if str(author).strip()]
+        if not normalized_authors:
+            return None
+        return ", ".join(normalized_authors)
+
+    @staticmethod
+    def _normalize_metadata_list(value: object) -> list[str]:
+        """Normalize a JSON field into a compact string list."""
+
+        if isinstance(value, list):
+            items = value
+        elif isinstance(value, str):
+            items = re.split(r"\s*[,;]\s*", value)
+        else:
+            return []
+
+        normalized: list[str] = []
+        for item in items:
+            text = re.sub(r"\s+", " ", str(item)).strip()
+            if text and text not in normalized:
+                normalized.append(text)
+        return normalized
+
+    @staticmethod
+    def _normalize_metadata_year(value: object) -> int | None:
+        """Normalize a model-provided year into a plausible integer."""
+
+        if value is None:
+            return None
+        match = re.search(r"\b(19|20)\d{2}\b", str(value))
+        if not match:
+            return None
+        return int(match.group(0))
 
     @staticmethod
     def _extract_json_object(text: str) -> str | None:
@@ -1077,9 +1152,12 @@ class PdfParser:
             image_name, image_bytes = rendered_payload
             width, height = self._extract_image_dimensions(image_bytes)
             nearby_text = self._extract_nearby_text(self._normalize_block_text(page_blocks), caption)
-            summary = self._build_image_summary(caption, nearby_text, page_number)
-            asset_type = self._infer_asset_type(caption, nearby_text, asset_kind)
-            keywords = self._extract_keywords(caption, nearby_text)
+            asset_metadata = self._build_asset_metadata(
+                caption=caption,
+                nearby_text=nearby_text,
+                page_number=page_number,
+                asset_kind=asset_kind,
+            )
             output_path = document_asset_dir / image_name
 
             assets.append(
@@ -1098,9 +1176,9 @@ class PdfParser:
                     asset_label=asset_label,
                     asset_index=asset_index,
                     caption=caption,
-                    summary=summary,
-                    asset_type=asset_type,
-                    keywords=keywords,
+                    summary=str(asset_metadata["summary"]),
+                    asset_type=str(asset_metadata["asset_type"]),
+                    keywords=list(asset_metadata["keywords"]),
                     related_chunk_ids=[],
                     media_type=self._guess_media_type(output_path),
                     byte_size=len(image_bytes),
@@ -1380,6 +1458,152 @@ class PdfParser:
             return f"Page {page_number} image. Nearby text: {nearby_text[:240]}"
         return f"Page {page_number} image with no extracted caption."
 
+    def _build_asset_metadata(
+        self,
+        *,
+        caption: str,
+        nearby_text: str,
+        page_number: int,
+        asset_kind: str,
+    ) -> dict[str, object]:
+        """Build summary, type, and keywords for one visual asset.
+
+        作用:
+            优先用可选 LLM 根据图注和附近正文生成更好的视觉资产 metadata。
+            当 LLM 不可用、输入上下文不足或输出不可解析时，回退到原规则。
+        """
+
+        llm_metadata = self._extract_asset_metadata_with_llm(
+            caption=caption,
+            nearby_text=nearby_text,
+            page_number=page_number,
+            asset_kind=asset_kind,
+        )
+        if llm_metadata:
+            return llm_metadata
+        return self._build_rule_based_asset_metadata(
+            caption=caption,
+            nearby_text=nearby_text,
+            page_number=page_number,
+            asset_kind=asset_kind,
+        )
+
+    def _build_rule_based_asset_metadata(
+        self,
+        *,
+        caption: str,
+        nearby_text: str,
+        page_number: int,
+        asset_kind: str,
+    ) -> dict[str, object]:
+        """Build asset metadata with deterministic fallback rules."""
+
+        return {
+            "summary": self._build_image_summary(caption, nearby_text, page_number),
+            "asset_type": self._infer_asset_type(caption, nearby_text, asset_kind),
+            "keywords": self._extract_keywords(caption, nearby_text),
+        }
+
+    def _extract_asset_metadata_with_llm(
+        self,
+        *,
+        caption: str,
+        nearby_text: str,
+        page_number: int,
+        asset_kind: str,
+    ) -> dict[str, object]:
+        """Ask the optional LLM to summarize and classify one asset from text context."""
+
+        context = f"{caption}\n{nearby_text}".strip()
+        if not context:
+            return {}
+        if self.title_extractor is None:
+            return {}
+        generate = getattr(self.title_extractor, "generate", None)
+        if not callable(generate):
+            return {}
+
+        prompt = self._build_asset_metadata_prompt(
+            caption=caption,
+            nearby_text=nearby_text,
+            page_number=page_number,
+            asset_kind=asset_kind,
+        )
+        try:
+            response = str(generate(prompt) or "")
+        except Exception:
+            return {}
+        return self._parse_asset_metadata_response(response)
+
+    def _build_asset_metadata_prompt(
+        self,
+        *,
+        caption: str,
+        nearby_text: str,
+        page_number: int,
+        asset_kind: str,
+    ) -> str:
+        """Build the prompt for text-only visual asset metadata extraction."""
+
+        allowed_types = (
+            "result_plot, architecture_diagram, workflow_diagram, table, "
+            "dataset_table, equation, ablation_plot, qualitative_example, unknown"
+        )
+        return (
+            "Build metadata for one academic paper visual asset using only the provided "
+            "caption and nearby text. Do not invent visual details that are not present. "
+            "Return only JSON with this shape: "
+            '{"summary": "", "asset_type": "unknown", "keywords": []}. '
+            f"asset_type must be one of: {allowed_types}.\n\n"
+            f"Page: {page_number}\n"
+            f"Asset kind: {asset_kind or 'visual'}\n"
+            f"Caption: {caption or '- none'}\n"
+            f"Nearby text: {nearby_text[:1200] or '- none'}"
+        )
+
+    def _parse_asset_metadata_response(self, response: str) -> dict[str, object]:
+        """Parse and validate one LLM asset metadata response."""
+
+        json_payload = self._extract_json_object(response.strip())
+        if not json_payload:
+            return {}
+        try:
+            parsed = json.loads(json_payload)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        summary = self._normalize_metadata_value(parsed.get("summary"))
+        if not summary:
+            return {}
+
+        asset_type = self._normalize_asset_type(parsed.get("asset_type"))
+        keywords = self._normalize_metadata_list(parsed.get("keywords"))
+        return {
+            "summary": summary,
+            "asset_type": asset_type,
+            "keywords": keywords,
+        }
+
+    @staticmethod
+    def _normalize_asset_type(value: object) -> str:
+        """Normalize model output into one supported asset type label."""
+
+        normalized = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
+        allowed_types = {
+            "result_plot",
+            "architecture_diagram",
+            "workflow_diagram",
+            "table",
+            "dataset_table",
+            "equation",
+            "ablation_plot",
+            "qualitative_example",
+            "unknown",
+        }
+        return normalized if normalized in allowed_types else "unknown"
+
     def _infer_asset_type(self, caption: str, nearby_text: str, asset_kind: str) -> str:
         """Infer a coarse visual asset type from caption and nearby text.
 
@@ -1504,3 +1728,45 @@ if __name__ == "__main__":
     sys.stdout.buffer.write(json.dumps(preview_payload, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
+
+"""
+parse_pdf(document)
+  ↓
+extract_pdf_pages(path)
+  - pypdf 打开 PDF
+  - page.extract_text()
+  - normalize_page_text()
+  - 得到 PdfPage[]
+
+  ↓
+parse_pdf_metadata(path)
+  - pypdf 读取 metadata
+  - 从 /Title 提取标题
+  - 如果标题不可信：
+      调用 _extract_metadata_with_llm(reader)
+      - 取前 2 页文本
+      - 构造 metadata 提取 prompt
+      - title_extractor.generate(prompt)
+      - 解析 JSON title/authors/summary/keywords/venue/year
+      - 过滤坏标题
+  - 如果 LLM 不可用或失败：
+      _extract_title_from_first_page(reader)
+  - author 优先使用 /Author，缺失时使用 LLM authors 拼接
+  - 返回 source_path / title / author / page_count，以及可用的 LLM metadata 字段
+
+  ↓
+extract_pdf_images(document, pages)
+  - PyMuPDF 打开 PDF
+  - page.get_images(full=True)
+  - extract_image(xref)
+  - Pillow 转 PNG
+  - 坏图 fallback 到页面区域截图
+  - caption 规则匹配
+  - 生成 summary / asset_type / keywords
+  - 过滤小图
+  - 生成 DocumentAsset
+  - caption-anchored rendering 补充矢量图/表格
+
+  ↓
+返回 PdfParseResult(metadata, pages, images)
+"""

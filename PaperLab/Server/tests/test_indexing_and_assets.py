@@ -48,7 +48,7 @@ class FakeAssetVectorStore:
         }
 
 
-def test_asset_indexer_writes_caption_summary_and_optional_image_vectors(tmp_path) -> None:
+def test_asset_indexer_skips_image_vectors_by_default(tmp_path) -> None:
     from indexing.asset_indexer import AssetIndexer
 
     image_path = tmp_path / "figure.png"
@@ -68,6 +68,33 @@ def test_asset_indexer_writes_caption_summary_and_optional_image_vectors(tmp_pat
     AssetIndexer(
         embedding_provider=FakeEmbeddingProvider(),
         vector_store=vector_store,
+    ).index_assets([asset])
+
+    assert vector_store.ensure_asset_args["image_vector_size"] is None
+    assert vector_store.upsert_payload["image_vectors"] is None
+
+
+def test_asset_indexer_writes_image_vectors_when_multimodal_embedding_enabled(tmp_path) -> None:
+    from indexing.asset_indexer import AssetIndexer
+
+    image_path = tmp_path / "figure.png"
+    image_path.write_bytes(b"fake-image")
+    asset = DocumentAsset(
+        id="asset-1",
+        document_id="doc-1",
+        page_number=1,
+        file_path=str(image_path),
+        file_name="figure.png",
+        caption="Caption text",
+        summary="Summary text",
+        metadata={"project_id": "project-1"},
+    )
+    vector_store = FakeAssetVectorStore()
+
+    AssetIndexer(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=vector_store,
+        multimodal_embedding_enabled=True,
     ).index_assets([asset])
 
     assert vector_store.ensure_asset_args["image_vector_size"] == 2
@@ -118,7 +145,63 @@ def test_answer_done_event_contains_displayable_asset_sources() -> None:
 
     assert done.event == "done"
     assert done.data["asset_sources"][0]["asset_id"] == "asset-1"
+    assert done.data["asset_sources"][0]["ref_id"] == "A1"
     assert done.data["asset_sources"][0]["file_url"] == "/documents/assets/asset-1/content"
+
+
+def test_grounded_answer_prompt_allows_inline_picture_references() -> None:
+    from prompts.builders import build_grounded_answer_prompt
+
+    asset = _asset("asset-1", "Figure summary", "Figure caption")
+    prompt = build_grounded_answer_prompt("What is shown?", FakeEvidencePack(asset))
+
+    assert "<ref pic>A1</ref pic>" in prompt
+    assert "[A1] Figure caption" in prompt
+
+
+def test_document_profile_uses_metadata_summary_and_keywords() -> None:
+    from indexing.document_indexer import DocumentIndexer
+
+    document = Document(
+        id="doc-1",
+        project_id="project-1",
+        path="C:/paper.pdf",
+        file_name="paper.pdf",
+        doc_type=DocumentType.PDF,
+        title="Paper Title",
+        status=DocumentStatus.DISCOVERED,
+        content_hash="hash",
+    )
+    chunks = [
+        Chunk(
+            id="chunk-1",
+            document_id="doc-1",
+            project_id="project-1",
+            chunk_index=0,
+            chunk_type=ChunkType.TEXT,
+            text="Long chunk fallback text that should not become the profile summary.",
+        )
+    ]
+
+    profile = DocumentIndexer(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=FakeAssetVectorStore(),
+    ).build_profile(
+        document,
+        chunks,
+        assets=[],
+        metadata={
+            "summary": "Short LLM paper summary.",
+            "keywords": ["metadata", "retrieval"],
+            "authors": ["Alice Example"],
+            "year": 2026,
+        },
+    )
+
+    assert profile.summary == "Short LLM paper summary."
+    assert profile.keywords[:2] == ["metadata", "retrieval"]
+    assert profile.metadata["authors"] == ["Alice Example"]
+    assert profile.metadata["year"] == 2026
 
 
 def _asset(asset_id: str, summary: str, caption: str) -> DocumentAsset:

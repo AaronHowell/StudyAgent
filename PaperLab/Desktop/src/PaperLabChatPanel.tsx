@@ -8,6 +8,7 @@ import {
   usePaperLabStream,
 } from "./usePaperLabStream";
 import type { ChatSessionSummary } from "./types";
+import { MarkdownRenderer } from "./components/chat/MarkdownRenderer";
 
 type LoopInterruptValue = {
   phase?: string;
@@ -445,7 +446,9 @@ function ChatTurnBubble({
         </div>
       ) : null}
 
-      <div className="chat-message-body">{turn.answer_text ?? ""}</div>
+      <div className="chat-message-body">
+        {turn.answer_text ? <MarkdownRenderer content={turn.answer_text} assetSources={assetSources} /> : null}
+      </div>
 
       {showSummary && summary ? (
         <div className="chat-message-summary">

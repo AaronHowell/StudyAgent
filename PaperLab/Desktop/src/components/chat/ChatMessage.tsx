@@ -41,7 +41,7 @@ export function ChatMessage({
         />
 
         <div className="message-body">
-          {turn.answer_text ? <MarkdownRenderer content={turn.answer_text} /> : null}
+          {turn.answer_text ? <MarkdownRenderer content={turn.answer_text} assetSources={turn.asset_sources ?? []} /> : null}
         </div>
 
         {showSummary && turn.summary ? (

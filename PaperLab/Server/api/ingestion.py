@@ -300,5 +300,5 @@ class IngestionTaskManager:
     捕获异常，并通过 _classify_error 转换成 task.state = "failed" 以及
     error_code / retryable / error_message 等字段，供前端轮询展示。
 
-    使用一个Lock() 来对整个
+    使用一个Lock() 来对整个Task修改保证保证串行，每个任务有四个状态，queued/runing/finish/false 
     """

@@ -68,6 +68,7 @@ class IngestDocumentUseCase:
         chunk_builder: ChunkBuilder,
         embedding_provider: EmbeddingProvider | None = None,
         vector_store: VectorStore | None = None,
+        multimodal_embedding_enabled: bool = False,
     ) -> None:
         """Create one ingestion use case with explicit dependencies.
 
@@ -79,6 +80,7 @@ class IngestDocumentUseCase:
             chunk_builder: 文本分块器。
             embedding_provider: 可选嵌入模型适配器。
             vector_store: 可选向量存储适配器。
+            multimodal_embedding_enabled: 是否启用视觉资产的多模态嵌入。
         """
 
         self.document_repository = document_repository
@@ -88,6 +90,7 @@ class IngestDocumentUseCase:
         self.chunk_builder = chunk_builder
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self.multimodal_embedding_enabled = multimodal_embedding_enabled
 
     def ingest(self, document: Document, *, export_assets: bool = False) -> IngestDocumentResult:
         """Run the ingestion pipeline for one document.
@@ -127,6 +130,7 @@ class IngestDocumentUseCase:
             )
 
         try:
+            parse_metadata: dict[str, object] = {}
             if hasattr(self.pdf_parser, "parse_pdf"):
                 parse_result = self.pdf_parser.parse_pdf(
                     document,
@@ -135,6 +139,7 @@ class IngestDocumentUseCase:
                 )
                 pages = parse_result.pages
                 assets = parse_result.images
+                parse_metadata = dict(getattr(parse_result, "metadata", {}) or {})
             else:
                 pages = self.pdf_parser.extract_pdf_pages(Path(document.path))
                 assets = []
@@ -160,7 +165,7 @@ class IngestDocumentUseCase:
             self.chunk_repository.replace_for_document(document.id, chunks)
 
             if self.vector_store is not None and self.embedding_provider is not None:
-                self._index_vectors(indexed_document, chunks, assets)
+                self._index_vectors(indexed_document, chunks, assets, parse_metadata)
 
             return IngestDocumentResult(
                 document=indexed_document,
@@ -262,6 +267,7 @@ class IngestDocumentUseCase:
         document: Document,
         chunks: list[Chunk],
         assets: list[DocumentAsset],
+        metadata: dict[str, object] | None = None,
     ) -> None:
         """Build embeddings and write document, chunk, and asset indexes.
 
@@ -275,7 +281,7 @@ class IngestDocumentUseCase:
             embedding_provider=self.embedding_provider,
             vector_store=self.vector_store,
         )
-        profile = document_indexer.build_profile(document, chunks, assets)
+        profile = document_indexer.build_profile(document, chunks, assets, metadata=metadata)
         document_title_vectors = self.embedding_provider.embed_texts([profile.title])
         vector_size = len(document_title_vectors[0])
 
@@ -295,6 +301,7 @@ class IngestDocumentUseCase:
         AssetIndexer(
             embedding_provider=self.embedding_provider,
             vector_store=self.vector_store,
+            multimodal_embedding_enabled=self.multimodal_embedding_enabled,
         ).index_assets(assets)
 
     @staticmethod
@@ -330,3 +337,41 @@ class IngestDocumentUseCase:
         safe_name = path.stem.replace(" ", "_")
         return f"{project_id}:{safe_name}:{content_hash[:12]}"
 
+"""
+ingest_from_path()：负责从路径构造 Document
+ingest()：负责真正的入库业务流程
+_delete_existing_document()：负责清理旧版本
+_index_vectors()：负责写向量库
+_compute_content_hash()：负责内容版本识别
+_build_document_id()：负责生成稳定文档 ID:document_id = project_id + 文件名 stem + 文件内容 hash 前 12 位
+
+接收 Document
+  ↓
+查数据库中是否已有同 path 的文档
+  ↓
+如果同 path + 同 hash + 已 INDEXED
+      直接跳过，不重复入库
+  ↓
+否则解析 PDF
+  ↓
+生成 pages 和 assets
+  ↓
+根据 pages 生成 chunks
+  ↓
+如果旧文档存在但 id 不同
+      删除旧文档相关数据
+  ↓
+构造新的 INDEXED 文档对象
+  ↓
+写 documents 表
+  ↓
+重写 assets 表
+  ↓
+重写 chunks 表
+  ↓
+如果配置了向量库和 embedding
+      写 document / chunk / asset 向量索引
+  ↓
+返回 IngestDocumentResult
+
+"""

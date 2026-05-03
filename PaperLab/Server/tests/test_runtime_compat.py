@@ -239,6 +239,7 @@ class RuntimeCompatTest(unittest.TestCase):
             "PAPERLAB_MYSQL_HOST": "shared-mysql",
             "PAPERLAB_QDRANT_URL": "http://shared-qdrant:6333",
             "PAPERLAB_LLM_MODEL": "shared-model",
+            "PAPERLAB_MULTIMODAL_EMBEDDING_ENABLED": "true",
             "PAPERLAB_API_PORT": "8123",
             "PAPERLAB_AGENT_LOOP_MAX_STEPS": "9",
         }
@@ -252,6 +253,8 @@ class RuntimeCompatTest(unittest.TestCase):
         self.assertEqual(agent.qdrant_url, "http://shared-qdrant:6333")
         self.assertEqual(api.llm_model, "shared-model")
         self.assertEqual(agent.llm_model, "shared-model")
+        self.assertEqual(api.multimodal_embedding_enabled, True)
+        self.assertEqual(agent.multimodal_embedding_enabled, True)
         self.assertEqual(api.port, 8123)
         self.assertEqual(agent.agent_loop_max_steps, 9)
 

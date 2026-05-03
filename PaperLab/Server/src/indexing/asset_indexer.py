@@ -10,9 +10,16 @@ from domain import DocumentAsset, EmbeddingProvider, VectorStore
 class AssetIndexer:
     """Index visual assets with caption, summary, and optional image vectors."""
 
-    def __init__(self, *, embedding_provider: EmbeddingProvider, vector_store: VectorStore) -> None:
+    def __init__(
+        self,
+        *,
+        embedding_provider: EmbeddingProvider,
+        vector_store: VectorStore,
+        multimodal_embedding_enabled: bool = False,
+    ) -> None:
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self.multimodal_embedding_enabled = multimodal_embedding_enabled
 
     def index_assets(self, assets: list[DocumentAsset]) -> None:
         if not assets or not hasattr(self.vector_store, "upsert_assets"):
@@ -41,6 +48,9 @@ class AssetIndexer:
         )
 
     def _try_embed_images(self, assets: list[DocumentAsset]) -> list[list[float]] | None:
+        if not self.multimodal_embedding_enabled:
+            return None
+
         image_paths = [asset.file_path for asset in assets if asset.file_path and Path(asset.file_path).exists()]
         if len(image_paths) != len(assets) or not hasattr(self.embedding_provider, "embed_images"):
             return None

@@ -361,3 +361,6 @@ class MemoryItem:
     importance: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
+"""
+GraphRAG 的类似分层存储结构
+"""

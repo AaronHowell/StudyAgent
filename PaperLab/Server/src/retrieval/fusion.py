@@ -1,4 +1,26 @@
-"""Small ranking helpers used by evidence retrieval."""
+"""Small ranking helpers used by evidence retrieval.
+
+fusion.py 负责多路召回结果的融合排序。
+
+它接收不同召回通道返回的 ScoredId 列表，例如：
+- document.title 召回结果
+- document.summary 召回结果
+- asset.caption 召回结果
+- asset.summary 召回结果
+- 可选 asset.image 召回结果
+
+然后按照 entity_id 去重，并使用：
+    fused_score += route_weight * hit.score + rank_bonus
+进行分数累加。
+
+因此，同一个对象如果被多路同时召回，会获得更高融合分数。
+fusion.py 的输出不是最终答案，而是 reranker 精排前的候选列表。
+
+在 RetrieveEvidenceUseCase 中，文档级 fusion 会先筛出候选 document_ids，
+后续 chunk 和 asset 检索会被限制在这些候选文档范围内。
+
+
+"""
 
 from __future__ import annotations
 

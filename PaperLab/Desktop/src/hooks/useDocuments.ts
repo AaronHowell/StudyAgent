@@ -53,7 +53,7 @@ export function useDocuments() {
     } catch { /* keep current */ }
   }, []);
 
-  const scan = useCallback(async (rootPath: string) => {
+  const scan = useCallback(async (rootPath: string, projectId: string) => {
     if (!rootPath) { setError("请先选择项目目录。"); return; }
     setLoading(true);
     setError("");
@@ -61,7 +61,7 @@ export function useDocuments() {
       const response = await fetch(`${apiBase}/documents/scan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ root_path: rootPath }),
+        body: JSON.stringify({ root_path: rootPath, project_id: projectId }),
       });
       if (!response.ok) throw new Error(await response.text());
       const payload = (await response.json()) as { documents: ScannedDocument[] };

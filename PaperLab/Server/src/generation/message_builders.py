@@ -13,6 +13,7 @@ def build_grounded_answer_prompt(
     evidence_pack: EvidencePack,
     memory_summary: str = "",
 ) -> str:
+    document_title_by_id = {hit.document_id: hit.title for hit in evidence_pack.documents}
     document_lines = [
         f"- {index + 1}. {hit.title} ({hit.path})"
         for index, hit in enumerate(evidence_pack.documents)
@@ -20,14 +21,16 @@ def build_grounded_answer_prompt(
     chunk_lines = [
         (
             f"[C{index + 1}] {hit.text}\n"
-            f"source: {hit.document_id} page={hit.page} section={hit.section or ''}".strip()
+            f"source: title=\"{document_title_by_id.get(hit.document_id, hit.document_id)}\" "
+            f"page={hit.page} section={hit.section or ''}".strip()
         )
         for index, hit in enumerate(evidence_pack.text_chunks)
     ]
     asset_lines = [
         (
             f"[A{index + 1}] {hit.caption or hit.summary or hit.asset_label}\n"
-            f"source: {hit.document_id} page={hit.page_number}"
+            f"source: title=\"{document_title_by_id.get(hit.document_id, hit.document_id)}\" "
+            f"page={hit.page_number}"
         )
         for index, hit in enumerate(evidence_pack.assets)
     ]
@@ -36,8 +39,9 @@ def build_grounded_answer_prompt(
         "Rules:\n"
         "1. Do not invent facts not present in the evidence.\n"
         "2. Cite text evidence with [C1], [C2], and visual evidence with [A1], [A2].\n"
-        "3. Visual evidence is recalled and shown to the user; use its caption/summary unless image blocks are explicitly provided.\n"
-        "4. If evidence is insufficient, say so clearly.\n\n"
+        "3. When a recalled visual is directly useful, place it in the answer with exactly <ref pic>A1</ref pic> using the matching visual evidence id.\n"
+        "4. Visual evidence is recalled and shown to the user; use its caption/summary unless image blocks are explicitly provided.\n"
+        "5. If evidence is insufficient, say so clearly.\n\n"
         f"Question:\n{question}\n\n"
         f"Relevant memory:\n{memory_summary or '- none'}\n\n"
         f"Candidate documents:\n{chr(10).join(document_lines) or '- none'}\n\n"
@@ -89,7 +93,7 @@ def build_multimodal_answer_messages(
 def _build_multimodal_text_prompt(context: MultimodalEvidenceContext) -> str:
     text_evidence = "\n".join(
         (
-            f'<chunk ref="{item.ref_id}" document_id="{item.document_id}" page="{item.page}">\n'
+            f'<chunk ref="{item.ref_id}" title="{item.document_title}" page="{item.page}">\n'
             f"{item.text}\n"
             "</chunk>"
         )
@@ -97,7 +101,7 @@ def _build_multimodal_text_prompt(context: MultimodalEvidenceContext) -> str:
     )
     image_evidence = "\n".join(
         (
-            f'<image ref="{item.ref_id}" asset_id="{item.asset_id}" document_id="{item.document_id}" page="{item.page}">\n'
+            f'<image ref="{item.ref_id}" asset_id="{item.asset_id}" title="{item.document_title}" page="{item.page}">\n'
             f"caption: {item.caption}\n"
             f"summary: {item.summary}\n"
             "</image>"
