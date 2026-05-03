@@ -9,12 +9,14 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from domain import MemoryType
+from prompts.builders import build_assessment_prompt
 from prompts.builders import build_main_route_messages
 from prompts.builders import build_synthesis_prompt
 
 from contracts import AgentResult
 from contracts import AgentTask
 from memory import build_memory_service
+from orchestration.assessment import parse_assessment_decision
 from orchestration.graph_messages import (
     _build_agent_result_message,
     _build_agent_task_message,
@@ -33,7 +35,6 @@ from orchestration.graph_messages import (
     _message_meta,
     _message_name,
     _message_text,
-    _result_confidence,
     _result_status,
     _stringify_for_prompt,
 )
@@ -42,7 +43,6 @@ from orchestration.graph_serialization import (
     _serialize_evidence_pack,
     _serialize_memory_item,
 )
-from orchestration.output_summary import build_progress_summary
 from orchestration.output_summary import parse_structured_assistant_output
 from orchestration.graph_state import PaperLabGraphState
 from orchestration.request_config import AgentRequestConfig
@@ -284,7 +284,15 @@ def prepare_turn_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
-    """Normalize the latest user input into one structured message."""
+    """Normalize the latest user input into one structured message.
+
+    prepare_turn_node 是主 Agent 图每一轮开始前的初始化节点。它会从当前 messages 中找到最新的用户输入，如果这条消息还没有被标准化，
+    就把它包装成带有 artifact_type="question"、turn_id、project_id、thread_id 等元数据的 HumanMessage，并把它作为本轮正式问题写回 state。
+    同时，它会初始化这一轮运行所需的控制状态，例如 active_turn_id、iteration_count=0、max_iterations、answer_confident=False、stop_reason=""、
+    processed_human_message_count 和 intervention_count。如果最新消息已经是标准化后的 question，它不会重复创建消息，只会恢复并重置本轮状态。
+    整体来说，这个函数负责把普通用户输入转换成 graph 内部可追踪、可恢复、可关联后续任务结果的标准 turn。
+    
+    """
 
     request_config = resolve_agent_request_config(dict(config or {}))
     messages = list(state.get("messages", []))
@@ -343,7 +351,35 @@ def build_short_term_context_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
-    """Build a short-term context artifact from recent conversation turns."""
+    """Build a short-term context artifact from recent conversation turns.
+    
+构建当前对话轮次的短期上下文。
+这个节点会读取当前 graph state 里的 messages，
+从中提取最近几轮 human / ai 对话内容，
+然后整理成一段 short_term_context 文本。
+
+它的目的不是回答问题，也不是检索论文，
+而是帮助后续节点理解用户当前问题的上下文。
+例如用户说“那下一个呢”“这个函数呢”时，
+后续节点可以通过短期上下文知道用户指的是什么。
+
+这里虽然使用了 MemoryService，
+但传入的是 backend=None，
+所以它不会查询长期记忆，也不会访问向量数据库。
+它只是复用 MemoryService 里的短期上下文整理逻辑。
+
+如果成功生成上下文，就会创建一条特殊的 ToolMessage：
+name = "build_short_term_context"
+artifact_type = "short_term_context"
+
+这条消息会被追加回 state["messages"]，
+后面的 main_route_node 会用它来判断该调用哪些专家，
+最后的 synthesize_node 也会用它来辅助生成最终回答。
+
+简单理解：
+prepare_turn_node 负责确定“这一轮用户问了什么”；
+build_short_term_context_node 负责补充“这一轮之前聊过什么”。
+# """
 
     request_config = resolve_agent_request_config(dict(config or {}))
     settings = AgentSettings.from_env()
@@ -429,12 +465,14 @@ async def main_route_node(
     short_term_message = _latest_tool_message(messages, "build_short_term_context")
     memory_message = _latest_tool_message(messages, "search_memory")
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
+    assessment_guidance = _latest_assessment_guidance(messages, turn_id=turn_id)
 
     system_prompt, user_prompt = build_main_route_messages(
         question=question,
         short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
         memory_context=_message_text(memory_message.content) if memory_message is not None else "",
         interventions=[_message_text(message.content) for message in intervention_messages],
+        assessment_guidance=assessment_guidance,
     )
     bound_model = _runtime().chat_model.bind_tools(_dispatch_schema())
     response = await bound_model.ainvoke(
@@ -495,11 +533,32 @@ async def main_route_node(
     if run_workspace:
         workspace_task = AgentTask(
             task_id=f"task_workspace_{uuid4().hex[:8]}",
-            task_type="workspace_ops",
+            task_type="implementation",
             agent_name="workspace_agent",
             query=workspace_query,
             reason=workspace_reason,
-            constraints={"workspace_root": "."},
+            constraints={
+                "objective": workspace_query,
+                "plan": [
+                    "Inspect the relevant workspace files and context.",
+                    "Apply the smallest scoped implementation needed for the objective.",
+                    "Run focused verification that matches the acceptance criteria.",
+                    "Prepare a concise implementation report.",
+                ],
+                "acceptance_criteria": [
+                    "The implementation directly addresses the workspace objective.",
+                    "Changed files are listed in the implementation report.",
+                    "Relevant verification results or blockers are reported.",
+                ],
+                "constraints": [
+                    "Keep mutable work inside the sandbox task workspace.",
+                    "Avoid unrelated refactors.",
+                    "Prefer focused commands and file reads over broad repository scans.",
+                ],
+                "workspace_root": ".",
+                "source_path": ".",
+                "max_steps": 8,
+            },
             metadata={},
         )
         task_messages.append(_build_agent_task_message(turn_id=turn_id, task=workspace_task))
@@ -622,79 +681,17 @@ async def parallel_specialists_node(
     }
 
 
-def _has_strong_retrieval_support(result: dict[str, Any]) -> bool:
-    metadata = dict(result.get("metadata", {}) or {})
-    citations = list(metadata.get("citations", []))
-    evidence_counts = dict(metadata.get("evidence_counts", {}) or {})
-    return (
-        bool(citations)
-        and _result_confidence(result) >= 0.7
-        and int(evidence_counts.get("chunk_count", 0) or 0) > 0
-    )
-
-
-def _has_strong_tool_support(result: dict[str, Any]) -> bool:
-    metadata = dict(result.get("metadata", {}) or {})
-    web_sources = list(metadata.get("web_sources", []))
-    tool_sources = list(metadata.get("tool_sources", []))
-    return bool(web_sources or tool_sources) and _result_confidence(result) >= 0.6
-
-
-def _has_strong_workspace_support(result: dict[str, Any]) -> bool:
-    metadata = dict(result.get("metadata", {}) or {})
-    workspace_sources = list(metadata.get("workspace_sources", []))
-    return bool(workspace_sources) and _result_confidence(result) >= 0.6
-
-
-def _answer_is_confident(
-    *,
-    retrieve_result: dict[str, Any],
-    tool_result: dict[str, Any],
-    workspace_result: dict[str, Any],
-) -> bool:
-    return (
-        _has_strong_retrieval_support(retrieve_result)
-        or _has_strong_tool_support(tool_result)
-        or _has_strong_workspace_support(workspace_result)
-    )
-
-
-def _agents_cannot_complete(
-    *,
-    retrieve_task: AgentTask | None,
-    tool_task: AgentTask | None,
-    workspace_task: AgentTask | None,
-    retrieve_result: dict[str, Any],
-    tool_result: dict[str, Any],
-    workspace_result: dict[str, Any],
-) -> bool:
-    requested_agents = [
-        item for item in (retrieve_task, tool_task, workspace_task) if item is not None
-    ]
-    if not requested_agents:
-        return not _answer_is_confident(
-            retrieve_result=retrieve_result,
-            tool_result=tool_result,
-            workspace_result=workspace_result,
-        )
-
-    terminal_failures = {"failed", "skipped", "cancelled"}
-    for task in requested_agents:
-        if task.agent_name == "retrieval_agent":
-            result = retrieve_result
-        elif task.agent_name == "tool_agent":
-            result = tool_result
-        else:
-            result = workspace_result
-        if not result:
-            return False
-        if _result_status(result) not in terminal_failures:
-            return False
-    return not _answer_is_confident(
-        retrieve_result=retrieve_result,
-        tool_result=tool_result,
-        workspace_result=workspace_result,
-    )
+def _latest_assessment_guidance(messages: list[BaseMessage], *, turn_id: str) -> list[str]:
+    guidance: list[str] = []
+    for message in _latest_messages_by_artifact(messages, "loop_status", turn_id=turn_id):
+        metadata = _message_meta(message)
+        if metadata.get("phase") != "assess_complete":
+            continue
+        for task in list(metadata.get("next_tasks", []) or []):
+            text = str(task).strip()
+            if text:
+                guidance.append(text)
+    return guidance
 
 
 def _route_after_assess(state: PaperLabGraphState) -> str:
@@ -727,43 +724,54 @@ def guidance_gate_pre_assess_node(
     )
 
 
-def assess_node(
+async def assess_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
-    """Assess whether the loop should continue or proceed to final synthesis."""
+    """Ask the model whether the loop should continue or proceed to final synthesis."""
 
     del config
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
+    messages = list(state.get("messages", []))
+    question = _latest_human_text(messages)
+    short_term_message = _latest_tool_message(messages, "build_short_term_context")
+    memory_message = _latest_tool_message(messages, "search_memory")
+    intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
     tool_result = dict(state.get("tool_result", {}) or {})
     workspace_result = dict(state.get("workspace_result", {}) or {})
-    answer_confident = _answer_is_confident(
-        retrieve_result=retrieve_result,
-        tool_result=tool_result,
-        workspace_result=workspace_result,
+
+    assessment_prompt = build_assessment_prompt(
+        question=question,
+        short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
+        memory_context=_message_text(memory_message.content) if memory_message is not None else "",
+        interventions=[_message_text(message.content) for message in intervention_messages],
+        specialist_payloads=[
+            _stringify_for_prompt(retrieve_result) if retrieve_result else "",
+            _stringify_for_prompt(tool_result) if tool_result else "",
+            _stringify_for_prompt(workspace_result) if workspace_result else "",
+        ],
     )
+    raw_assessment = await _runtime().chat_model.ainvoke(assessment_prompt)
+    decision = parse_assessment_decision(_message_text(getattr(raw_assessment, "content", raw_assessment)))
+    answer_confident = decision.answer_confident
+    next_tasks = [] if answer_confident else list(decision.next_tasks)
+    if not answer_confident and not next_tasks:
+        next_tasks = [f"Gather additional evidence that directly answers: {question}"]
+
     stop_reason = ""
-    if _agents_cannot_complete(
-        retrieve_task=state.get("retrieve_task"),
-        tool_task=state.get("tool_task"),
-        workspace_task=state.get("workspace_task"),
-        retrieve_result=retrieve_result,
-        tool_result=tool_result,
-        workspace_result=workspace_result,
-    ):
-        stop_reason = "agent_cannot_complete"
-    elif (
+    if (
         int(state.get("iteration_count", 0) or 0)
         >= int(state.get("max_iterations", 1) or 1)
         and not answer_confident
     ):
         stop_reason = "max_iterations_reached"
-    status_summary = (
-        "Assess found enough evidence for synthesis."
-        if answer_confident or stop_reason
-        else "Assess requested another routing iteration."
-    )
+    if answer_confident:
+        status_summary = "Assess found enough evidence for synthesis."
+    elif stop_reason:
+        status_summary = "Assess requested more evidence, but the loop reached its stop condition."
+    else:
+        status_summary = "Assess requested another routing iteration with new evidence tasks."
     return {
         "messages": [
             _build_loop_status_message(
@@ -774,6 +782,7 @@ def assess_node(
                 metadata={
                     "answer_confident": answer_confident,
                     "stop_reason": stop_reason,
+                    "next_tasks": next_tasks,
                 },
             )
         ],
@@ -872,7 +881,7 @@ async def synthesize_node(
     }
 
 
-def recall_memory_node(
+async def recall_memory_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
@@ -885,7 +894,8 @@ def recall_memory_node(
         settings=AgentSettings.from_env(),
     )
     question = _latest_human_text(state.get("messages", []))
-    recall_result = memory_service.recall(
+    recall_result = await asyncio.to_thread(
+        memory_service.recall,
         role="supervisor",
         query=question,
         project_id=request_config.project_id,
@@ -985,10 +995,10 @@ def build_graph():
     builder.add_node("release_thread_lock", release_thread_lock_node)
 
     builder.add_edge(START, "prepare_turn")
-    builder.add_edge("prepare_turn", "build_short_term_context")
+    builder.add_edge("prepare_turn", "thread_lock")
+    builder.add_edge("thread_lock", "build_short_term_context")
     builder.add_edge("build_short_term_context", "recall_memory")
-    builder.add_edge("recall_memory", "thread_lock")
-    builder.add_edge("thread_lock", "guidance_gate_pre_route")
+    builder.add_edge("recall_memory", "guidance_gate_pre_route")
     builder.add_edge("guidance_gate_pre_route", "main_route")
     builder.add_edge("main_route", "guidance_gate_post_route")
     builder.add_edge("guidance_gate_post_route", "parallel_specialists")

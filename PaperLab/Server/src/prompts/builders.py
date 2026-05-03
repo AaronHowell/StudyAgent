@@ -14,6 +14,7 @@ def build_main_route_messages(
     short_term_context: str = "",
     memory_context: str = "",
     interventions: Iterable[str] = (),
+    assessment_guidance: Iterable[str] = (),
 ) -> tuple[str, str]:
     """Build the coordinator routing prompt."""
 
@@ -28,6 +29,12 @@ def build_main_route_messages(
     intervention_lines = [item for item in interventions if item]
     if intervention_lines:
         prompt_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    assessment_lines = [item for item in assessment_guidance if item]
+    if assessment_lines:
+        prompt_parts.append(
+            "Assessment guidance from previous evidence review:\n"
+            + "\n".join(f"- {item}" for item in assessment_lines)
+        )
     prompt_parts.append(
         "Use retrieval for project-grounded paper evidence. "
         "Use the tool specialist for web or MCP-backed external information. "
@@ -73,6 +80,41 @@ def build_synthesis_prompt(
     return "\n\n".join(synthesis_parts)
 
 
+def build_assessment_prompt(
+    *,
+    question: str,
+    short_term_context: str = "",
+    memory_context: str = "",
+    interventions: Iterable[str] = (),
+    specialist_payloads: Iterable[str] = (),
+) -> str:
+    """Build the evidence sufficiency assessment prompt."""
+
+    assessment_parts = [
+        "Decide whether the available specialist evidence is enough to answer the question.",
+        f"Question:\n{question}",
+    ]
+    if short_term_context:
+        assessment_parts.append(f"Short-term context:\n{short_term_context}")
+    if memory_context:
+        assessment_parts.append(f"Relevant memory:\n{memory_context}")
+    intervention_lines = [item for item in interventions if item]
+    if intervention_lines:
+        assessment_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    result_blocks = [payload for payload in specialist_payloads if payload]
+    if result_blocks:
+        assessment_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
+    assessment_parts.append(
+        "Return valid JSON with exactly two top-level keys: "
+        "`answer_confident` and `next_tasks`. "
+        "`answer_confident` must be true only when the evidence is sufficient for final synthesis. "
+        "`next_tasks` must be an empty list when `answer_confident` is true. "
+        "When evidence is insufficient, set `answer_confident` to false and put concrete follow-up evidence-gathering tasks in `next_tasks`. "
+        "Do not include chain-of-thought or extra keys."
+    )
+    return "\n\n".join(assessment_parts)
+
+
 def build_tool_agent_selection_messages(*, task_query: str, reason: str) -> tuple[str, str]:
     """Build the ToolAgent tool-selection prompt."""
 
@@ -88,10 +130,11 @@ def build_workspace_agent_selection_messages(*, task_query: str, reason: str) ->
     """Build the WorkspaceAgent action-selection prompt."""
 
     return (
-        "You are WorkspaceAgent. Choose exactly one workspace tool call. "
-        "Repository access is read-only. Before running local commands or writing files, create a sandbox task. "
-        "All mutable work must stay inside that task workspace.",
-        f"Task query:\n{task_query}\n\nReason:\n{reason}",
+        "You are WorkspaceAgent, a goal-driven implementation specialist. "
+        "Choose exactly one workspace action for the current implementation step. "
+        "Use list/read/search for inspection. Use write/run only inside the provided sandbox task. "
+        "Use finish only when acceptance criteria are met or a blocker prevents further progress.",
+        f"Task query and implementation state:\n{task_query}\n\nReason:\n{reason}",
     )
 
 
