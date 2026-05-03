@@ -1,4 +1,69 @@
-"""Shared runtime factory for the PaperLab LangGraph graph."""
+# runtime/dependencies.py
+#
+# 作用：
+#   这是整个后端 Agent 运行时的依赖装配中心，也可以理解为 composition root。
+#   它不负责具体业务逻辑，而是负责从配置中创建各种基础设施对象，
+#   然后把这些对象注入到 UseCase 和 AgentRuntime 中，供上层 Agent 调用。
+#
+# 主要流程：
+#   1. 从 AgentSettings 读取运行配置。
+#   2. 创建 MySQL 相关 Repository：
+#        - MySQLDocumentRepository
+#        - MySQLDocumentAssetRepository
+#        - MySQLChunkRepository
+#      并调用 ensure_tables() 确保数据表存在。
+#
+#   3. 创建 EmbeddingProvider：
+#        - OpenAICompatibleEmbeddingProvider
+#      用于把 query、chunk、title、summary、caption 等文本转换成向量。
+#
+#   4. 创建 Qdrant 向量库适配器：
+#        - QdrantChunkVectorStore
+#      用于向量写入、向量检索、payload 过滤和向量删除。
+#
+#   5. 根据配置可选创建 RerankerProvider：
+#        - OpenAICompatibleRerankerProvider
+#      如果没有开启 reranker，则检索流程只使用向量召回和 fusion；
+#      如果开启 reranker，则会在召回和融合后增加精排阶段。
+#
+#   6. 创建 RetrieveEvidenceUseCase：
+#      将 embedding_provider、vector_store、document_repository、
+#      chunk_repository、asset_repository、reranker_provider 等依赖注入进去。
+#      因此 RetrieveEvidenceUseCase 只负责业务编排，不负责自己创建数据库或模型服务。
+#
+#   7. 创建 ChatOpenAI 作为主聊天模型。
+#
+#   8. 根据配置可选创建：
+#        - memory_store：长期记忆
+#        - web_search_provider：网页搜索
+#        - mcp_tool_provider：MCP 工具
+#        - cache_store：Redis 缓存
+#
+#   9. 最后返回 AgentRuntime，作为 Agent 系统运行时统一使用的依赖容器。
+#
+# 设计思想：
+#   - 依赖注入：
+#       业务类不在内部 new 具体实现，而是由 runtime 层创建后传入。
+#
+#   - 依赖倒置：
+#       UseCase 面向抽象能力编程，具体的 MySQL、Qdrant、Embedding、Reranker
+#       都放在 integrations 层实现。
+#
+#   - 配置解耦：
+#       MySQL、Qdrant、LLM、Embedding、Reranker、Memory、Redis、MCP 等配置
+#       都来自 AgentSettings，而不是写死在业务代码里。
+#
+#   - 可选模块：
+#       reranker、memory、web_search、MCP、Redis 都可以通过配置开启或关闭。
+#
+# 注意点：
+#   - create_runtime() 如果在应用启动时只调用一次，不加缓存也可以。
+#   - 如果它作为 FastAPI dependency 被每个请求调用，可能会重复创建 runtime，
+#     更合理的做法是额外提供一个 @lru_cache(maxsize=1) 的 get_runtime()。
+#   - AgentRuntime 内部有 speculative_runs 字典，用来管理异步专家任务状态；
+#     如果 AgentRuntime 被做成全局单例，需要确认这些状态是否应该跨请求共享。
+#   - ensure_tables() 放在运行时初始化中方便开发，但生产环境更推荐使用 migration 工具管理表结构。
+
 
 from __future__ import annotations
 
