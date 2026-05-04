@@ -249,6 +249,8 @@ class AgentSettings(BaseSettings):
 
     default_project_id: str = DEFAULT_PROJECT_ID
     memory_enabled: bool = False
+    memory_backend: str = "mem0"
+    memory_markdown_root: str = "data/memory"
     memory_recall_limit: int = 5
     memory_history_db_path: str = ".mem0/history.db"
     memory_vector_collection_name: str = "paperlab_memory"
@@ -306,12 +308,25 @@ class AgentSettings(BaseSettings):
         return f"redis://{auth}{host}:{port}/{db}"
 
     @classmethod
+    def _memory_backend_env(cls) -> str:
+        value = cls._env("PAPERLAB_MEMORY_BACKEND", "STUDY_AGENT_MEMORY_BACKEND", default="mem0").strip().lower()
+        if value in {"mem0", "markdown"}:
+            return value
+        return "mem0"
+
+    @classmethod
     def from_env(cls) -> "AgentSettings":
         mcp_servers = cls._json_env("PAPERLAB_MCP_SERVERS_JSON", "STUDY_AGENT_MCP_SERVERS_JSON")
         return cls(
             **cls._shared_env_values(),
             default_project_id=cls._env("PAPERLAB_DEFAULT_PROJECT_ID", "STUDY_AGENT_DEFAULT_PROJECT_ID", default=DEFAULT_PROJECT_ID),
             memory_enabled=cls._bool_env("PAPERLAB_MEMORY_ENABLED", "STUDY_AGENT_MEMORY_ENABLED", False),
+            memory_backend=cls._memory_backend_env(),
+            memory_markdown_root=cls._env(
+                "PAPERLAB_MEMORY_MARKDOWN_ROOT",
+                "STUDY_AGENT_MEMORY_MARKDOWN_ROOT",
+                default="data/memory",
+            ),
             memory_recall_limit=cls._int_env("PAPERLAB_MEMORY_RECALL_LIMIT", "STUDY_AGENT_MEMORY_RECALL_LIMIT", 5),
             memory_history_db_path=cls._env("PAPERLAB_MEMORY_HISTORY_DB_PATH", "STUDY_AGENT_MEMORY_HISTORY_DB_PATH", default=".mem0/history.db"),
             memory_vector_collection_name=cls._env(

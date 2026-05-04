@@ -121,6 +121,36 @@ class MemoryService:
             return False
         return True
 
+    def store_memory(
+        self,
+        *,
+        role: AgentRole,
+        project_id: str,
+        thread_id: str | None,
+        content: str,
+        metadata: dict[str, object],
+        memory_type: MemoryType = MemoryType.RESEARCH_EPISODE,
+    ) -> bool:
+        profile = memory_profile_for_role(role, self.settings)
+        normalized_content = content.strip()
+        if not profile.long_term_enabled or self.backend is None or not normalized_content:
+            return False
+
+        try:
+            self.backend.remember_messages(
+                project_id=project_id,
+                thread_id=thread_id,
+                messages=[
+                    {"role": "assistant", "content": normalized_content},
+                ],
+                memory_type=memory_type,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Long-term memory store failed; continuing without persistence: %s", exc)
+            return False
+        return True
+
     def build_short_term_context(
         self,
         *,

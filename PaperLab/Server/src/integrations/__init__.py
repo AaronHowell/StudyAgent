@@ -6,6 +6,10 @@ from integrations.llm.llms import OpenAICompatibleLLMConfig, OpenAICompatibleLLM
 from integrations.llm.rerankers import OpenAICompatibleRerankerConfig, OpenAICompatibleRerankerProvider
 from integrations.mcp.mcp_tools import McpToolProvider, McpToolProviderConfig
 from integrations.mcp.web_search import DDGSWebSearchConfig, DDGSWebSearchProvider
+from integrations.storage.markdown_memory_store import (
+    ChatModelMarkdownMemorySelector,
+    MarkdownMemoryStore,
+)
 from integrations.storage.mem0_memory_store import Mem0MemoryConfig, Mem0MemoryStore
 from integrations.storage.mysql_repositories import (
     MySQLChunkRepository,
@@ -19,6 +23,8 @@ from integrations.vectorstore.qdrant_store import QdrantChunkVectorStore, Qdrant
 __all__ = [
     "DDGSWebSearchConfig",
     "DDGSWebSearchProvider",
+    "ChatModelMarkdownMemorySelector",
+    "MarkdownMemoryStore",
     "Mem0MemoryConfig",
     "Mem0MemoryStore",
     "McpToolProvider",

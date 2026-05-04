@@ -80,6 +80,8 @@ from usecases import RetrieveEvidenceUseCase
 from integrations import (
     DDGSWebSearchConfig,
     DDGSWebSearchProvider,
+    ChatModelMarkdownMemorySelector,
+    MarkdownMemoryStore,
     Mem0MemoryConfig,
     Mem0MemoryStore,
     McpToolProvider,
@@ -340,7 +342,12 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
         streaming=True,
     )
     memory_store = None
-    if resolved.memory_enabled:
+    if resolved.memory_enabled and resolved.memory_backend == "markdown":
+        memory_store = MarkdownMemoryStore(
+            root_path=Path(resolved.memory_markdown_root).expanduser(),
+            selector=ChatModelMarkdownMemorySelector(chat_model=chat_model),
+        )
+    elif resolved.memory_enabled:
         history_db_path = Path(resolved.memory_history_db_path).expanduser()
         history_db_path.parent.mkdir(parents=True, exist_ok=True)
         memory_vector_config: dict[str, object] = {
@@ -434,5 +441,4 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
         mcp_tool_provider=mcp_tool_provider,
         cache_store=cache_store,
     )
-
 

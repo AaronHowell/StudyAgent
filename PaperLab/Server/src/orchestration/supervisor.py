@@ -178,6 +178,79 @@ def _memory_backend() -> Any | None:
     return getattr(runtime, "memory_backend", getattr(runtime, "memory_store", None))
 
 
+def _memory_write_schema() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "decide_memory_write",
+                "description": (
+                    "Decide whether this completed turn contains a stable, reusable memory. "
+                    "Default to should_write=false unless the memory is clearly long-term useful."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "should_write": {"type": "boolean"},
+                        "memory_type": {
+                            "type": "string",
+                            "enum": [
+                                MemoryType.PREFERENCE.value,
+                                MemoryType.PROJECT_FACT.value,
+                                MemoryType.RESEARCH_EPISODE.value,
+                            ],
+                        },
+                        "content": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["should_write", "memory_type", "content", "reason"],
+                },
+            },
+        }
+    ]
+
+
+def _default_memory_write_decision() -> dict[str, object]:
+    return {
+        "should_write": False,
+        "memory_type": MemoryType.RESEARCH_EPISODE.value,
+        "content": "",
+        "reason": "No explicit long-term memory write decision.",
+    }
+
+
+def _parse_memory_write_decision(raw_answer: Any) -> dict[str, object]:
+    tool_calls = [
+        call
+        for call in _extract_tool_calls(raw_answer)
+        if str(call.get("name") or "") == "decide_memory_write"
+    ]
+    if not tool_calls:
+        return _default_memory_write_decision()
+
+    args = _coerce_tool_call_args(tool_calls[0])
+    should_write = bool(args.get("should_write", False))
+    content = str(args.get("content") or "").strip()
+    memory_type = str(args.get("memory_type") or MemoryType.RESEARCH_EPISODE.value)
+    if memory_type not in {item.value for item in MemoryType}:
+        memory_type = MemoryType.RESEARCH_EPISODE.value
+    if not content:
+        should_write = False
+    return {
+        "should_write": should_write,
+        "memory_type": memory_type,
+        "content": content if should_write else "",
+        "reason": str(args.get("reason") or "").strip(),
+    }
+
+
+def _coerce_memory_type(value: object) -> MemoryType:
+    try:
+        return MemoryType(str(value))
+    except ValueError:
+        return MemoryType.RESEARCH_EPISODE
+
+
 def _materialize_intervention_update(
     *,
     state: PaperLabGraphState,
@@ -838,7 +911,18 @@ async def synthesize_node(
             _stringify_for_prompt(workspace_result) if workspace_result else "",
         ],
     )
-    raw_answer = await _runtime().chat_model.ainvoke(synthesis_prompt)
+    memory_decision_prompt = (
+        synthesis_prompt
+        + "\n\nMemory write policy:\n"
+        + "- You may call `decide_memory_write` at most once.\n"
+        + "- Default to `should_write=false`.\n"
+        + "- Write memory only for stable long-term user preferences, durable project facts, or reusable research lessons.\n"
+        + "- Do not write ordinary answers, temporary tasks, uncertain claims, private/sensitive data, or duplicate memory.\n"
+        + "- If unsure, call `decide_memory_write` with `should_write=false`."
+    )
+    bound_model = _runtime().chat_model.bind_tools(_memory_write_schema())
+    raw_answer = await bound_model.ainvoke(memory_decision_prompt)
+    memory_write_decision = _parse_memory_write_decision(raw_answer)
     answer_text, progress_summary = parse_structured_assistant_output(
         _message_text(getattr(raw_answer, "content", raw_answer))
     )
@@ -866,6 +950,7 @@ async def synthesize_node(
             "stop_reason": str(state.get("stop_reason") or ""),
             "intervention_count": int(state.get("intervention_count", 0) or 0),
             "summary": progress_summary,
+            "memory_write_decision": memory_write_decision,
             "worker_progress": {
                 "retrieval": dict(retrieve_metadata.get("progress_summary", {}) or {}),
                 "tool": dict(tool_metadata.get("progress_summary", {}) or {}),
@@ -937,21 +1022,30 @@ async def store_memory_node(
         return {}
 
     assistant_meta = _message_meta(assistant_message)
+    memory_decision = dict(assistant_meta.get("memory_write_decision", {}) or {})
+    if not bool(memory_decision.get("should_write", False)):
+        return {}
+    memory_content = str(memory_decision.get("content") or "").strip()
+    if not memory_content:
+        return {}
+
     memory_service = build_memory_service(
         backend=_memory_backend(),
         settings=AgentSettings.from_env(),
     )
-    memory_service.store_turn(
+    memory_service.store_memory(
         role="supervisor",
         project_id=request_config.project_id,
         thread_id=request_config.thread_id,
-        user_text=user_text,
-        assistant_text=_message_text(assistant_message.content),
+        content=memory_content,
         metadata={
+            "reason": str(memory_decision.get("reason") or ""),
+            "source_question": user_text,
             "citations": list(assistant_meta.get("citations", [])),
             "evidence_counts": dict(assistant_meta.get("evidence_counts", {})),
             "depends_on": list(assistant_meta.get("depends_on", [])),
         },
+        memory_type=_coerce_memory_type(memory_decision.get("memory_type")),
     )
     return {}
 
@@ -1024,6 +1118,3 @@ retrieve_agent_graph = build_retrieve_agent_graph(
 tool_agent_graph = build_tool_agent_graph()
 workspace_agent_graph = build_workspace_agent_graph()
 graph = build_graph()
-
-
-

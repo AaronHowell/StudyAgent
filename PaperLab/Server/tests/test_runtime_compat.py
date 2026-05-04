@@ -234,6 +234,29 @@ class RuntimeCompatTest(unittest.TestCase):
         self.assertEqual(settings.qdrant_document_collection_name, "legacy_documents")
         self.assertEqual(settings.llm_model, "demo-model")
 
+    def test_memory_backend_defaults_to_mem0(self) -> None:
+        settings = AgentSettings()
+
+        self.assertEqual(settings.memory_backend, "mem0")
+        self.assertEqual(settings.memory_markdown_root, "data/memory")
+
+    def test_memory_backend_can_switch_to_markdown(self) -> None:
+        env = {
+            "PAPERLAB_MEMORY_BACKEND": "markdown",
+            "PAPERLAB_MEMORY_MARKDOWN_ROOT": "custom/memory",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = AgentSettings.from_env()
+
+        self.assertEqual(settings.memory_backend, "markdown")
+        self.assertEqual(settings.memory_markdown_root, "custom/memory")
+
+    def test_invalid_memory_backend_falls_back_to_mem0(self) -> None:
+        with patch.dict(os.environ, {"PAPERLAB_MEMORY_BACKEND": "bad-backend"}, clear=False):
+            settings = AgentSettings.from_env()
+
+        self.assertEqual(settings.memory_backend, "mem0")
+
     def test_api_and_agent_settings_share_base_environment_parsing(self) -> None:
         env = {
             "PAPERLAB_MYSQL_HOST": "shared-mysql",
