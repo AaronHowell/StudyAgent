@@ -196,6 +196,16 @@ def _coerce_graph_input(request: ChatRunRequest) -> dict[str, Any] | Command | N
         )
         if resume_value is None:
             return None
+        if request.command.update is not None and request.command.update.messages:
+            if not isinstance(resume_value, dict):
+                resume_value = {"value": resume_value}
+            resume_value = dict(resume_value)
+            resume_value["pending_messages"] = [
+                message.model_dump()
+                if hasattr(message, "model_dump")
+                else {"type": message.type, "content": message.content}
+                for message in request.command.update.messages
+            ]
         return Command(resume=resume_value)
 
     raw_input = request.input or {}

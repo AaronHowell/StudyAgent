@@ -80,6 +80,48 @@ def build_synthesis_prompt(
     return "\n\n".join(synthesis_parts)
 
 
+def build_answer_or_continue_prompt(
+    *,
+    question: str,
+    short_term_context: str = "",
+    memory_context: str = "",
+    interventions: Iterable[str] = (),
+    specialist_payloads: Iterable[str] = (),
+    must_answer: bool = False,
+) -> str:
+    """Build the combined answer-or-loop prompt."""
+
+    prompt_parts = [
+        "Decide whether the available specialist evidence is enough to answer the user's question.",
+        f"Question:\n{question}",
+    ]
+    if short_term_context:
+        prompt_parts.append(f"Short-term context:\n{short_term_context}")
+    if memory_context:
+        prompt_parts.append(f"Relevant memory:\n{memory_context}")
+    intervention_lines = [item for item in interventions if item]
+    if intervention_lines:
+        prompt_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    result_blocks = [payload for payload in specialist_payloads if payload]
+    if result_blocks:
+        prompt_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
+    if must_answer:
+        prompt_parts.append(
+            "The loop has reached its stop condition. Provide the best grounded answer possible, "
+            "clearly naming any missing or uncertain evidence."
+        )
+    prompt_parts.append(
+        "If evidence is enough, return valid JSON with exactly four top-level keys: "
+        "`answer_confident`, `answer`, `summary`, and `next_tasks`; set `answer_confident` to true, "
+        "put the user-facing grounded reply in `answer`, put an object with string fields "
+        "`done`, `next`, and `pending` in `summary`, and set `next_tasks` to an empty list. "
+        "If evidence is insufficient and the loop can continue, do not answer; call the virtual "
+        "`continue_evidence_loop` tool with a reason and concrete follow-up evidence tasks. "
+        "Do not include chain-of-thought or extra keys."
+    )
+    return "\n\n".join(prompt_parts)
+
+
 def build_assessment_prompt(
     *,
     question: str,

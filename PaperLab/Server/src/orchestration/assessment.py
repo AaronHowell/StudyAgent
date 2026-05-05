@@ -11,6 +11,14 @@ class AssessmentDecision:
     next_tasks: list[str]
 
 
+@dataclass(slots=True)
+class AnswerOrContinueDecision:
+    answer_confident: bool
+    next_tasks: list[str]
+    answer: str
+    summary: dict[str, str]
+
+
 def parse_assessment_decision(raw_output: Any) -> AssessmentDecision:
     """Parse the model's evidence-sufficiency decision."""
 
@@ -18,6 +26,26 @@ def parse_assessment_decision(raw_output: Any) -> AssessmentDecision:
     answer_confident = _coerce_bool(payload.get("answer_confident", False))
     next_tasks = [] if answer_confident else _coerce_next_tasks(payload.get("next_tasks", []))
     return AssessmentDecision(answer_confident=answer_confident, next_tasks=next_tasks)
+
+
+def parse_answer_or_continue_decision(raw_output: Any) -> AnswerOrContinueDecision:
+    """Parse the model's combined answer-or-loop decision."""
+
+    payload = _load_json_object(str(raw_output))
+    answer_confident = _coerce_bool(payload.get("answer_confident", False))
+    if answer_confident:
+        return AnswerOrContinueDecision(
+            answer_confident=True,
+            next_tasks=[],
+            answer=str(payload.get("answer") or payload.get("content") or "").strip(),
+            summary=_coerce_summary(payload.get("summary")),
+        )
+    return AnswerOrContinueDecision(
+        answer_confident=False,
+        next_tasks=[],
+        answer="",
+        summary={"done": "", "next": "", "pending": ""},
+    )
 
 
 def _load_json_object(raw_output: str) -> dict[str, Any]:
@@ -63,6 +91,16 @@ def _coerce_bool(value: Any) -> bool:
         if normalized in {"false", "no", "0", ""}:
             return False
     return bool(value)
+
+
+def _coerce_summary(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {"done": "", "next": "", "pending": ""}
+    return {
+        "done": str(value.get("done") or "").strip(),
+        "next": str(value.get("next") or "").strip(),
+        "pending": str(value.get("pending") or "").strip(),
+    }
 
 
 def _coerce_task(value: Any) -> str:

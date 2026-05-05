@@ -9,14 +9,14 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from domain import MemoryType
-from prompts.builders import build_assessment_prompt
+from prompts.builders import build_answer_or_continue_prompt
 from prompts.builders import build_main_route_messages
 from prompts.builders import build_synthesis_prompt
 
 from contracts import AgentResult
 from contracts import AgentTask
 from memory import build_memory_service
-from orchestration.assessment import parse_assessment_decision
+from orchestration.assessment import parse_answer_or_continue_decision
 from orchestration.graph_messages import (
     _build_agent_result_message,
     _build_agent_task_message,
@@ -179,35 +179,85 @@ def _memory_backend() -> Any | None:
 
 
 def _memory_write_schema() -> list[dict[str, object]]:
+    return [_memory_write_tool_schema()]
+
+
+def _answer_or_loop_schema() -> list[dict[str, object]]:
     return [
+        _memory_write_tool_schema(),
         {
             "type": "function",
             "function": {
-                "name": "decide_memory_write",
+                "name": "continue_evidence_loop",
                 "description": (
-                    "Decide whether this completed turn contains a stable, reusable memory. "
-                    "Default to should_write=false unless the memory is clearly long-term useful."
+                    "Call this virtual tool when the current evidence is not enough to answer. "
+                    "Provide concrete follow-up evidence tasks for the next routing loop."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "should_write": {"type": "boolean"},
-                        "memory_type": {
-                            "type": "string",
-                            "enum": [
-                                MemoryType.PREFERENCE.value,
-                                MemoryType.PROJECT_FACT.value,
-                                MemoryType.RESEARCH_EPISODE.value,
-                            ],
-                        },
-                        "content": {"type": "string"},
                         "reason": {"type": "string"},
+                        "next_tasks": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                     },
-                    "required": ["should_write", "memory_type", "content", "reason"],
+                    "required": ["reason", "next_tasks"],
                 },
             },
-        }
+        },
     ]
+
+
+def _memory_write_tool_schema() -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "decide_memory_write",
+            "description": (
+                "Decide whether this completed turn contains a stable, reusable memory. "
+                "Default to should_write=false unless the memory is clearly long-term useful."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "should_write": {"type": "boolean"},
+                    "memory_type": {
+                        "type": "string",
+                        "enum": [
+                            MemoryType.PREFERENCE.value,
+                            MemoryType.PROJECT_FACT.value,
+                            MemoryType.RESEARCH_EPISODE.value,
+                        ],
+                    },
+                    "content": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["should_write", "memory_type", "content", "reason"],
+            },
+        },
+    }
+
+
+def _parse_continue_loop_decision(raw_answer: Any) -> dict[str, object]:
+    tool_calls = [
+        call
+        for call in _extract_tool_calls(raw_answer)
+        if str(call.get("name") or "") == "continue_evidence_loop"
+    ]
+    if not tool_calls:
+        return {"should_loop": False, "reason": "", "next_tasks": []}
+    args = _coerce_tool_call_args(tool_calls[0])
+    next_tasks = []
+    for item in list(args.get("next_tasks", []) or []):
+        text = str(item).strip()
+        if text:
+            next_tasks.append(text)
+    return {
+        "should_loop": True,
+        "reason": str(args.get("reason") or "").strip(),
+        "next_tasks": next_tasks,
+    }
 
 
 def _default_memory_write_decision() -> dict[str, object]:
@@ -256,6 +306,7 @@ def _materialize_intervention_update(
     state: PaperLabGraphState,
     config: RunnableConfig | None,
     phase: str,
+    resume_value: Any = None,
 ) -> dict[str, Any]:
     request_config = resolve_agent_request_config(dict(config or {}))
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
@@ -266,12 +317,14 @@ def _materialize_intervention_update(
 
     new_interventions: list[HumanMessage] = []
     intervention_texts: list[str] = []
-    for message in unseen_humans:
+    for message in [*unseen_humans, *_pending_human_messages_from_resume(resume_value)]:
         artifact_type = str(_message_meta(message).get("artifact_type") or "")
         if artifact_type in {"question", "intervention"}:
             continue
         text = _message_text(message.content).strip()
         if not text:
+            continue
+        if text in intervention_texts:
             continue
         new_interventions.append(
             _build_intervention_message(
@@ -307,6 +360,23 @@ def _materialize_intervention_update(
         "answer_confident": False,
         "stop_reason": "",
     }
+
+
+def _pending_human_messages_from_resume(resume_value: Any) -> list[HumanMessage]:
+    if not isinstance(resume_value, dict):
+        return []
+    raw_messages = list(resume_value.get("pending_messages", []) or [])
+    pending: list[HumanMessage] = []
+    for raw_message in raw_messages:
+        if not isinstance(raw_message, dict):
+            continue
+        if str(raw_message.get("type") or "human") != "human":
+            continue
+        content = str(raw_message.get("content") or "").strip()
+        if not content:
+            continue
+        pending.append(HumanMessage(content=content))
+    return pending
 
 
 async def thread_lock_node(
@@ -447,7 +517,7 @@ artifact_type = "short_term_context"
 
 这条消息会被追加回 state["messages"]，
 后面的 main_route_node 会用它来判断该调用哪些专家，
-最后的 synthesize_node 也会用它来辅助生成最终回答。
+最后的 answer-or-loop assess_node 也会用它来辅助判断是否直接生成最终回答。
 
 简单理解：
 prepare_turn_node 负责确定“这一轮用户问了什么”；
@@ -513,13 +583,15 @@ def guidance_gate_pre_route_node(
 ) -> Command[Literal["main_route"]]:
     """Pause before main routing so the UI can inject new guidance."""
 
+    resume_value = None
     if interrupt is not None:
-        interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_pre_route"))
+        resume_value = interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_pre_route"))
     return Command(
         update=_materialize_intervention_update(
             state=state,
             config=config,
             phase="guidance_gate_pre_route",
+            resume_value=resume_value,
         ),
         goto="main_route",
     )
@@ -674,13 +746,15 @@ def guidance_gate_post_route_node(
 ) -> Command[Literal["parallel_specialists"]]:
     """Pause after routing and before specialist execution."""
 
+    resume_value = None
     if interrupt is not None:
-        interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_post_route"))
+        resume_value = interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_post_route"))
     return Command(
         update=_materialize_intervention_update(
             state=state,
             config=config,
             phase="guidance_gate_post_route",
+            resume_value=resume_value,
         ),
         goto="parallel_specialists",
     )
@@ -692,40 +766,85 @@ async def parallel_specialists_node(
 ) -> PaperLabGraphState:
     """Run retrieval, tool, and workspace specialists concurrently for one routing iteration."""
 
-    request_config = resolve_agent_request_config(dict(config or {}))
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     retrieve_task = state.get("retrieve_task")
     tool_task = state.get("tool_task")
     workspace_task = state.get("workspace_task")
 
-    async def run_retrieval() -> AgentResult | None:
+    async def run_retrieval() -> tuple[AgentResult | None, list[BaseMessage]]:
         if retrieve_task is None:
-            return None
-        return await run_retrieve_specialist(task=retrieve_task, request_config=request_config)
+            return None, []
+        return await _invoke_specialist_subgraph(
+            graph=retrieve_agent_graph,
+            task_key="retrieve_task",
+            result_key="retrieve_result",
+            task=retrieve_task,
+            turn_id=turn_id,
+            config=config,
+        )
 
-    async def run_tool() -> AgentResult | None:
+    async def run_tool() -> tuple[AgentResult | None, list[BaseMessage]]:
         if tool_task is None:
-            return None
-        return await run_tool_specialist(task=tool_task)
+            return None, []
+        return await _invoke_specialist_subgraph(
+            graph=tool_agent_graph,
+            task_key="tool_task",
+            result_key="tool_result",
+            task=tool_task,
+            turn_id=turn_id,
+            config=config,
+        )
 
-    async def run_workspace() -> AgentResult | None:
+    async def run_workspace() -> tuple[AgentResult | None, list[BaseMessage]]:
         if workspace_task is None:
-            return None
-        return await run_workspace_specialist(task=workspace_task)
+            return None, []
+        return await _invoke_specialist_subgraph(
+            graph=workspace_agent_graph,
+            task_key="workspace_task",
+            result_key="workspace_result",
+            task=workspace_task,
+            turn_id=turn_id,
+            config=config,
+        )
 
-    retrieval_result, tool_result, workspace_result = await asyncio.gather(
+    retrieval_output, tool_output, workspace_output = await asyncio.gather(
         run_retrieval(),
         run_tool(),
         run_workspace(),
     )
+    retrieval_result, retrieval_messages = retrieval_output
+    tool_result, tool_messages = tool_output
+    workspace_result, workspace_messages = workspace_output
 
-    output_messages: list[BaseMessage] = []
+    output_messages: list[BaseMessage] = [
+        *retrieval_messages,
+        *tool_messages,
+        *workspace_messages,
+    ]
     if retrieval_result is not None:
-        output_messages.append(_build_agent_result_message(turn_id=turn_id, result=retrieval_result))
+        output_messages.extend(
+            _fallback_agent_result_messages(
+                turn_id=turn_id,
+                result=retrieval_result,
+                existing_messages=retrieval_messages,
+            )
+        )
     if tool_result is not None:
-        output_messages.append(_build_agent_result_message(turn_id=turn_id, result=tool_result))
+        output_messages.extend(
+            _fallback_agent_result_messages(
+                turn_id=turn_id,
+                result=tool_result,
+                existing_messages=tool_messages,
+            )
+        )
     if workspace_result is not None:
-        output_messages.append(_build_agent_result_message(turn_id=turn_id, result=workspace_result))
+        output_messages.extend(
+            _fallback_agent_result_messages(
+                turn_id=turn_id,
+                result=workspace_result,
+                existing_messages=workspace_messages,
+            )
+        )
 
     output_messages.append(
         _build_loop_status_message(
@@ -754,6 +873,65 @@ async def parallel_specialists_node(
     }
 
 
+async def _invoke_specialist_subgraph(
+    *,
+    graph: Any,
+    task_key: str,
+    result_key: str,
+    task: AgentTask,
+    turn_id: str,
+    config: RunnableConfig | None,
+) -> tuple[AgentResult | None, list[BaseMessage]]:
+    if graph is None:
+        return None, []
+    child_state = await graph.ainvoke(
+        {
+            "active_turn_id": turn_id,
+            task_key: task,
+        },
+        config=config,
+    )
+    if not isinstance(child_state, dict):
+        return None, []
+    messages = [
+        message
+        for message in list(child_state.get("messages", []) or [])
+        if getattr(message, "type", "") == "tool"
+    ]
+    result = _agent_result_from_payload(child_state.get(result_key))
+    return result, messages
+
+
+def _fallback_agent_result_messages(
+    *,
+    turn_id: str,
+    result: AgentResult,
+    existing_messages: list[BaseMessage],
+) -> list[BaseMessage]:
+    for message in existing_messages:
+        metadata = _message_meta(message)
+        payload = dict(metadata.get("result", {}) or {})
+        if payload.get("task_id") == result.task_id and payload.get("agent_name") == result.agent_name:
+            return []
+    return [_build_agent_result_message(turn_id=turn_id, result=result)]
+
+
+def _agent_result_from_payload(payload: Any) -> AgentResult | None:
+    if isinstance(payload, AgentResult):
+        return payload
+    if not isinstance(payload, dict):
+        return None
+    return AgentResult(
+        task_id=str(payload.get("task_id") or ""),
+        agent_name=str(payload.get("agent_name") or ""),
+        status=str(payload.get("status") or ""),
+        summary=str(payload.get("summary") or ""),
+        artifacts=list(payload.get("artifacts", []) or []),
+        confidence=float(payload.get("confidence", 0.0) or 0.0),
+        metadata=dict(payload.get("metadata", {}) or {}),
+    )
+
+
 def _latest_assessment_guidance(messages: list[BaseMessage], *, turn_id: str) -> list[str]:
     guidance: list[str] = []
     for message in _latest_messages_by_artifact(messages, "loop_status", turn_id=turn_id):
@@ -769,13 +947,13 @@ def _latest_assessment_guidance(messages: list[BaseMessage], *, turn_id: str) ->
 
 def _route_after_assess(state: PaperLabGraphState) -> str:
     if bool(state.get("answer_confident", False)):
-        return "synthesize"
+        return "store_memory"
     if str(state.get("stop_reason") or ""):
-        return "synthesize"
+        return "store_memory"
     iteration_count = int(state.get("iteration_count", 0) or 0)
     max_iterations = int(state.get("max_iterations", 1) or 1)
     if iteration_count >= max_iterations:
-        return "synthesize"
+        return "store_memory"
     return "guidance_gate_pre_route"
 
 
@@ -785,13 +963,15 @@ def guidance_gate_pre_assess_node(
 ) -> Command[Literal["assess"]]:
     """Pause after specialists complete so the UI can inject guidance before assessment."""
 
+    resume_value = None
     if interrupt is not None:
-        interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_pre_assess"))
+        resume_value = interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_pre_assess"))
     return Command(
         update=_materialize_intervention_update(
             state=state,
             config=config,
             phase="guidance_gate_pre_assess",
+            resume_value=resume_value,
         ),
         goto="assess",
     )
@@ -801,7 +981,7 @@ async def assess_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
-    """Ask the model whether the loop should continue or proceed to final synthesis."""
+    """Ask the model whether to answer now or continue the evidence loop."""
 
     del config
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
@@ -814,7 +994,10 @@ async def assess_node(
     tool_result = dict(state.get("tool_result", {}) or {})
     workspace_result = dict(state.get("workspace_result", {}) or {})
 
-    assessment_prompt = build_assessment_prompt(
+    iteration_count = int(state.get("iteration_count", 0) or 0)
+    max_iterations = int(state.get("max_iterations", 1) or 1)
+    must_answer = iteration_count >= max_iterations
+    answer_or_continue_prompt = build_answer_or_continue_prompt(
         question=question,
         short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
         memory_context=_message_text(memory_message.content) if memory_message is not None else "",
@@ -824,21 +1007,46 @@ async def assess_node(
             _stringify_for_prompt(tool_result) if tool_result else "",
             _stringify_for_prompt(workspace_result) if workspace_result else "",
         ],
+        must_answer=must_answer,
     )
-    raw_assessment = await _runtime().chat_model.ainvoke(assessment_prompt)
-    decision = parse_assessment_decision(_message_text(getattr(raw_assessment, "content", raw_assessment)))
-    answer_confident = decision.answer_confident
-    next_tasks = [] if answer_confident else list(decision.next_tasks)
+    memory_decision_prompt = _append_memory_write_policy(answer_or_continue_prompt)
+    bound_model = _runtime().chat_model.bind_tools(_answer_or_loop_schema())
+    raw_assessment = await bound_model.ainvoke(memory_decision_prompt)
+    loop_decision = _parse_continue_loop_decision(raw_assessment)
+    decision = parse_answer_or_continue_decision(
+        _message_text(getattr(raw_assessment, "content", raw_assessment))
+    )
+    answer_confident = decision.answer_confident and not bool(loop_decision.get("should_loop", False))
+    next_tasks = (
+        []
+        if answer_confident
+        else list(loop_decision.get("next_tasks", []) or [])
+    )
     if not answer_confident and not next_tasks:
         next_tasks = [f"Gather additional evidence that directly answers: {question}"]
 
     stop_reason = ""
-    if (
-        int(state.get("iteration_count", 0) or 0)
-        >= int(state.get("max_iterations", 1) or 1)
-        and not answer_confident
-    ):
+    if must_answer and not answer_confident:
         stop_reason = "max_iterations_reached"
+        answer_confident = True
+    if answer_confident:
+        return _build_assistant_answer_update(
+            state=state,
+            raw_answer=raw_assessment,
+            answer_text=decision.answer
+            or "I do not have enough evidence to provide a fully grounded answer.",
+            progress_summary=decision.summary,
+            retrieve_result=retrieve_result,
+            tool_result=tool_result,
+            workspace_result=workspace_result,
+            turn_id=turn_id,
+            question=question,
+            short_term_message=short_term_message,
+            memory_message=memory_message,
+            intervention_messages=intervention_messages,
+            answer_confident=True,
+            stop_reason=stop_reason,
+        )
     if answer_confident:
         status_summary = "Assess found enough evidence for synthesis."
     elif stop_reason:
@@ -851,14 +1059,94 @@ async def assess_node(
                 turn_id=turn_id,
                 phase="assess_complete",
                 summary=status_summary,
-                iteration_count=int(state.get("iteration_count", 0) or 0),
+                iteration_count=iteration_count,
                 metadata={
                     "answer_confident": answer_confident,
                     "stop_reason": stop_reason,
                     "next_tasks": next_tasks,
+                    "loop_reason": str(loop_decision.get("reason") or ""),
                 },
             )
         ],
+        "answer_confident": answer_confident,
+        "stop_reason": stop_reason,
+    }
+
+
+def _append_memory_write_policy(prompt: str) -> str:
+    return (
+        prompt
+        + "\n\nMemory write policy:\n"
+        + "- You may call `decide_memory_write` at most once.\n"
+        + "- Default to `should_write=false`.\n"
+        + "- Write memory only for stable long-term user preferences, durable project facts, or reusable research lessons.\n"
+        + "- Do not write ordinary answers, temporary tasks, uncertain claims, private/sensitive data, or duplicate memory.\n"
+        + "- If unsure, call `decide_memory_write` with `should_write=false`."
+    )
+
+
+def _build_assistant_answer_update(
+    *,
+    state: PaperLabGraphState,
+    raw_answer: Any,
+    answer_text: str,
+    progress_summary: dict[str, str],
+    retrieve_result: dict[str, Any],
+    tool_result: dict[str, Any],
+    workspace_result: dict[str, Any],
+    turn_id: str,
+    question: str,
+    short_term_message: BaseMessage | None,
+    memory_message: BaseMessage | None,
+    intervention_messages: list[BaseMessage],
+    answer_confident: bool,
+    stop_reason: str,
+) -> PaperLabGraphState:
+    del question
+    dependencies: list[str] = []
+    if short_term_message is not None:
+        dependencies.append(_message_id(short_term_message))
+    if memory_message is not None:
+        dependencies.append(_message_id(memory_message))
+    messages = list(state.get("messages", []))
+    result_messages = _latest_messages_by_artifact(messages, "agent_result", turn_id=turn_id)
+    dependencies.extend(_message_id(message) for message in result_messages if _message_id(message))
+    dependencies.extend(_message_id(message) for message in intervention_messages if _message_id(message))
+
+    retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
+    tool_metadata = dict(tool_result.get("metadata", {}) or {})
+    workspace_metadata = dict(workspace_result.get("metadata", {}) or {})
+    assistant_message = _build_assistant_message(
+        turn_id=turn_id,
+        content=answer_text,
+        metadata={
+            "artifact_type": "answer",
+            "depends_on": dependencies,
+            "citations": list(retrieve_metadata.get("citations", [])),
+            "memory_hits": list(_message_meta(memory_message).get("memory_hits", []))
+            if memory_message
+            else [],
+            "evidence_counts": dict(retrieve_metadata.get("evidence_counts", {})),
+            "web_sources": list(tool_metadata.get("web_sources", [])),
+            "tool_sources": list(tool_metadata.get("tool_sources", [])),
+            "workspace_sources": list(workspace_metadata.get("workspace_sources", [])),
+            "reusable": True,
+            "orchestration": "weak_speculative_multi_agent",
+            "answer_confident": answer_confident,
+            "stop_reason": stop_reason,
+            "intervention_count": int(state.get("intervention_count", 0) or 0),
+            "summary": progress_summary,
+            "memory_write_decision": _parse_memory_write_decision(raw_answer),
+            "worker_progress": {
+                "retrieval": dict(retrieve_metadata.get("progress_summary", {}) or {}),
+                "tool": dict(tool_metadata.get("progress_summary", {}) or {}),
+                "workspace": dict(workspace_metadata.get("progress_summary", {}) or {}),
+            },
+        },
+        raw_id=getattr(raw_answer, "id", None),
+    )
+    return {
+        "messages": [assistant_message],
         "answer_confident": answer_confident,
         "stop_reason": stop_reason,
     }
@@ -1084,7 +1372,6 @@ def build_graph():
     builder.add_node("parallel_specialists", parallel_specialists_node)
     builder.add_node("guidance_gate_pre_assess", guidance_gate_pre_assess_node)
     builder.add_node("assess", assess_node)
-    builder.add_node("synthesize", synthesize_node)
     builder.add_node("store_memory", store_memory_node)
     builder.add_node("release_thread_lock", release_thread_lock_node)
 
@@ -1103,10 +1390,9 @@ def build_graph():
         _route_after_assess,
         {
             "guidance_gate_pre_route": "guidance_gate_pre_route",
-            "synthesize": "synthesize",
+            "store_memory": "store_memory",
         },
     )
-    builder.add_edge("synthesize", "store_memory")
     builder.add_edge("store_memory", "release_thread_lock")
     builder.add_edge("release_thread_lock", END)
     return builder.compile(checkpointer=_build_checkpointer())

@@ -16,7 +16,7 @@ class SupervisorGraphOrderTest(unittest.TestCase):
 
         self.assertNotIn("def _answer_is_confident", supervisor_source)
         self.assertNotIn("_has_strong_retrieval_support", supervisor_source)
-        self.assertIn("parse_assessment_decision", supervisor_source)
+        self.assertIn("parse_answer_or_continue_decision", supervisor_source)
 
 
 if __name__ == "__main__":

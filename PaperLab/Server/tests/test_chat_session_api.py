@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from session_storage.service import SessionStorageService
 
@@ -249,3 +250,25 @@ def test_chat_stream_emits_interrupt_event_when_graph_pauses() -> None:
 
             assert response.status_code == 200
             assert "event: interrupt" in response.text
+
+
+def test_resume_command_carries_update_messages_as_pending_queue() -> None:
+    chat_module = importlib.import_module("api.chat")
+    request = chat_module.ChatRunRequest.model_validate(
+        {
+            "project_id": "project-a",
+            "thread_id": "thread-1",
+            "command": {
+                "update": {"messages": [{"type": "human", "content": "请优先检查方法部分"}]},
+                "resume": {"action": "continue_with_guidance"},
+            },
+        }
+    )
+
+    graph_input = chat_module._coerce_graph_input(request)
+
+    assert isinstance(graph_input, Command)
+    assert graph_input.resume == {
+        "action": "continue_with_guidance",
+        "pending_messages": [{"type": "human", "content": "请优先检查方法部分"}],
+    }
