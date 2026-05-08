@@ -32,6 +32,7 @@ export function useDocuments() {
   const [taskByPath, setTaskByPath] = useState<Record<string, IngestionTaskSummary>>({});
   const [ingestingId, setIngestingId] = useState<string | null>(null);
   const [batchIngesting, setBatchIngesting] = useState(false);
+  const [metadataRefreshingPath, setMetadataRefreshingPath] = useState<string | null>(null);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -93,6 +94,27 @@ export function useDocuments() {
     }
   }, []);
 
+  const refreshMetadata = useCallback(async (document: ScannedDocument, projectId: string) => {
+    setMetadataRefreshingPath(document.path);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/documents/metadata/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId, path: document.path }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as { document: ScannedDocument };
+      setDocuments((current) =>
+        current.map((item) => (item.path === document.path ? { ...item, ...payload.document } : item)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "解析元数据失败");
+    } finally {
+      setMetadataRefreshingPath(null);
+    }
+  }, []);
+
   const batchIngest = useCallback(async (projectId: string) => {
     const candidates = documents
       .filter((doc) => {
@@ -146,12 +168,14 @@ export function useDocuments() {
     taskByPath,
     ingestingId,
     batchIngesting,
+    metadataRefreshingPath,
     activeTaskCount,
     completedCount,
     pendingCount,
     scan,
     ingest,
     batchIngest,
+    refreshMetadata,
     refreshTasks,
     setError,
   };

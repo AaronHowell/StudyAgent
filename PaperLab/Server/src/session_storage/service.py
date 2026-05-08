@@ -6,6 +6,7 @@ from datetime import UTC
 from datetime import datetime
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 from uuid import uuid4
 
@@ -152,6 +153,13 @@ class SessionStorageService:
             messages=messages,
             checkpoint=checkpoint,
         )
+
+    def delete_session(self, *, project_id: str, session_id: str) -> bool:
+        session_dir = self._session_root(project_id, session_id)
+        if not session_dir.exists():
+            return False
+        shutil.rmtree(session_dir)
+        return True
 
     def load_worker_events(
         self,

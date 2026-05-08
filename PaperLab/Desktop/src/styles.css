@@ -509,20 +509,43 @@ p { margin: 0; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: auto;
+  min-width: 0;
+}
+
+.paper-card-status {
+  display: flex;
+  align-items: center;
+  flex: 1 1 112px;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .paper-card-date {
   font-size: 12px;
   color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .paper-card-actions {
   display: flex;
+  flex: 1 1 156px;
+  justify-content: flex-end;
+  min-width: 0;
   gap: 4px;
   opacity: 0;
   transition: opacity 100ms ease;
+}
+
+.paper-card-actions .btn {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-inline: 6px;
 }
 
 .paper-card:hover .paper-card-actions {
@@ -1112,6 +1135,38 @@ p { margin: 0; }
   gap: 4px;
 }
 
+.chat-tools-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  user-select: none;
+}
+
+.chat-tools-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.chat-tool-approval-args {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat-composer-right {
   display: flex;
   align-items: center;
@@ -1669,6 +1724,20 @@ p { margin: 0; }
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.reader-resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 150ms ease;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.reader-resize-handle:hover,
+.reader-resize-handle:active {
+  background: var(--accent);
 }
 
 .reader-collapsed-strip {

@@ -20,6 +20,38 @@ def build_assistant_metadata(citations: list[Citation]) -> dict[str, object]:
     }
 
 
+def build_asset_citations_metadata(asset_citations: list[object]) -> list[dict[str, object]]:
+    return [
+        {
+            "asset_id": getattr(citation, "asset_id", ""),
+            "document_id": getattr(citation, "document_id", ""),
+            "document_title": getattr(citation, "document_title", ""),
+            "page": getattr(citation, "page", None),
+            "label": getattr(citation, "label", ""),
+            "locator": getattr(citation, "locator", ""),
+        }
+        for citation in asset_citations
+    ]
+
+
+def build_asset_sources_metadata(asset_hits: list[object]) -> list[dict[str, object]]:
+    return [
+        {
+            "ref_id": f"A{index + 1}",
+            "asset_id": getattr(hit, "asset_id", ""),
+            "document_id": getattr(hit, "document_id", ""),
+            "page_number": getattr(hit, "page_number", None),
+            "asset_label": getattr(hit, "asset_label", ""),
+            "caption": getattr(hit, "caption", ""),
+            "summary": getattr(hit, "summary", ""),
+            "asset_type": getattr(hit, "asset_type", ""),
+            "file_name": getattr(hit, "file_name", ""),
+            "file_url": f"/documents/assets/{getattr(hit, 'asset_id', '')}/content",
+        }
+        for index, hit in enumerate(asset_hits)
+    ]
+
+
 def serialize_memory_item(item: MemoryItem) -> dict[str, object]:
     return {
         "id": item.id,

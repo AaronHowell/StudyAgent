@@ -158,6 +158,14 @@ class IngestDocumentUseCase:
                 title=document.title,
                 status=DocumentStatus.INDEXED,
                 content_hash=document.content_hash,
+                llm_title=document.llm_title or (existing_document.llm_title if existing_document else ""),
+                llm_metadata=(
+                    dict(document.llm_metadata)
+                    if document.llm_metadata
+                    else dict(existing_document.llm_metadata)
+                    if existing_document
+                    else {}
+                ),
             )
 
             self.document_repository.upsert(indexed_document)
@@ -192,6 +200,14 @@ class IngestDocumentUseCase:
                 title=document.title,
                 status=DocumentStatus.FAILED,
                 content_hash=document.content_hash,
+                llm_title=document.llm_title or (existing_document.llm_title if existing_document else ""),
+                llm_metadata=(
+                    dict(document.llm_metadata)
+                    if document.llm_metadata
+                    else dict(existing_document.llm_metadata)
+                    if existing_document
+                    else {}
+                ),
             )
             try:
                 self.document_repository.upsert(failed_document)

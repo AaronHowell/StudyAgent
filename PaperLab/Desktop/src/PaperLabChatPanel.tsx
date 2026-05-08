@@ -11,8 +11,17 @@ import type { ChatSessionSummary } from "./types";
 import { MarkdownRenderer } from "./components/chat/MarkdownRenderer";
 
 type LoopInterruptValue = {
+  type?: string;
   phase?: string;
   question?: string;
+  approval?: {
+    tool_call_id: string;
+    tool_name: string;
+    args: Record<string, unknown>;
+    risk: string;
+    platform: Record<string, unknown>;
+    preview: string;
+  };
 };
 
 type ChatThreadSummary = {
@@ -45,10 +54,11 @@ export function PaperLabChatPanel({
   showThreadSidebar = false,
 }: PaperLabChatPanelProps) {
   const [draft, setDraft] = useState("");
-  const [interventionDraft, setInterventionDraft] = useState("");
   const [showSummaries, setShowSummaries] = useState(false);
+  const [toolsEnabled, setToolsEnabled] = useState(false);
   const [serverThreads, setServerThreads] = useState<ChatThreadSummary[]>([]);
   const submitLockRef = useRef(false);
+  const guidanceQueueLockRef = useRef(false);
   const stream = usePaperLabStream<LoopInterruptValue>({
     apiBaseUrl: apiBase,
   });
@@ -92,16 +102,42 @@ export function PaperLabChatPanel({
   }, [projectId, stream.listSessions, stream.restoreSession, stream.resetThread]);
 
   async function handleSendMessage() {
-    if (submitLockRef.current || stream.isLoading) {
-      return;
-    }
-
     const text = draft.trim();
     if (!text) {
       return;
     }
 
     const threadId = stream.threadId;
+    if (stream.isLoading) {
+      if (guidanceQueueLockRef.current) {
+        return;
+      }
+      guidanceQueueLockRef.current = true;
+      setDraft("");
+      try {
+        await stream.queueGuidance({
+          projectId,
+          threadId,
+          content: text,
+          optimisticTurn: {
+            id: `local-guidance-${Date.now()}`,
+            role: "user",
+            content: text,
+            created_at: new Date().toISOString(),
+          },
+        });
+      } catch {
+        setDraft(text);
+      } finally {
+        guidanceQueueLockRef.current = false;
+      }
+      return;
+    }
+
+    if (submitLockRef.current) {
+      return;
+    }
+
     upsertThreadSummary({
       id: threadId,
       title: buildThreadTitle(text),
@@ -124,6 +160,7 @@ export function PaperLabChatPanel({
         },
         {
           projectId,
+          toolsEnabled,
           optimisticTurns: [
             {
               id: `local-user-${Date.now()}`,
@@ -135,50 +172,6 @@ export function PaperLabChatPanel({
         },
       );
       touchThread(threadId);
-      void refreshSessions(projectId);
-    } catch {
-      // Error surfaced through stream state.
-    } finally {
-      submitLockRef.current = false;
-    }
-  }
-
-  async function handleSubmitIntervention() {
-    if (submitLockRef.current || stream.isLoading) {
-      return;
-    }
-
-    const text = interventionDraft.trim();
-    if (!text) {
-      return;
-    }
-
-    submitLockRef.current = true;
-    try {
-      await stream.submit(null, {
-        projectId,
-        command: {
-          update: {
-            messages: [
-              {
-                type: "human",
-                content: text,
-              },
-            ],
-          },
-          resume: { action: "continue_with_guidance" },
-        },
-        optimisticTurns: [
-          {
-            id: `local-guidance-${Date.now()}`,
-            role: "user",
-            content: text,
-            created_at: new Date().toISOString(),
-          },
-        ],
-      });
-      setInterventionDraft("");
-      touchThread(stream.threadId);
       void refreshSessions(projectId);
     } catch {
       // Error surfaced through stream state.
@@ -322,18 +315,23 @@ export function PaperLabChatPanel({
           )}
         </div>
 
-        {stream.interrupt ? (
-          <InterruptPanel
+        {stream.interrupt?.value.type === "tool_approval" ? (
+          <ToolApprovalPanel
             interrupt={stream.interrupt}
-            interventionDraft={interventionDraft}
-            onInterventionDraftChange={setInterventionDraft}
-            onContinue={() =>
+            onApprove={() =>
               void stream.submit(null, {
                 projectId,
-                command: { resume: { action: "continue" } },
+                toolsEnabled,
+                command: { resume: { action: "approve" } },
               })
             }
-            onSubmitIntervention={() => void handleSubmitIntervention()}
+            onReject={() =>
+              void stream.submit(null, {
+                projectId,
+                toolsEnabled,
+                command: { resume: { action: "reject" } },
+              })
+            }
           />
         ) : null}
 
@@ -350,10 +348,18 @@ export function PaperLabChatPanel({
             <button className="button subtle small-button" onClick={() => stream.stop()} disabled={!stream.isLoading}>
               停止
             </button>
+            <label className="chat-tools-toggle">
+              <input
+                type="checkbox"
+                checked={toolsEnabled}
+                onChange={(event) => setToolsEnabled(event.target.checked)}
+              />
+              工具
+            </label>
             <button
               className="button primary send-button"
               onClick={() => void handleSendMessage()}
-              disabled={stream.isLoading || !draft.trim()}
+              disabled={!draft.trim()}
             >
               发送
             </button>
@@ -364,38 +370,37 @@ export function PaperLabChatPanel({
   );
 }
 
-function InterruptPanel({
+function ToolApprovalPanel({
   interrupt,
-  interventionDraft,
-  onInterventionDraftChange,
-  onContinue,
-  onSubmitIntervention,
+  onApprove,
+  onReject,
 }: {
   interrupt: InterruptPayload<LoopInterruptValue>;
-  interventionDraft: string;
-  onInterventionDraftChange: (value: string) => void;
-  onContinue: () => void;
-  onSubmitIntervention: () => void;
+  onApprove: () => void;
+  onReject: () => void;
 }) {
+  const approval = interrupt.value.approval;
+  if (!approval) return null;
   return (
     <section className="chat-interrupt-panel">
-      <strong>当前流程已暂停</strong>
-      {interrupt.value.question ? <p>{interrupt.value.question}</p> : null}
+      <strong>工具调用审批</strong>
+      <p>{approval.preview || interrupt.value.question}</p>
+      <div className="chat-tool-approval-meta">
+        <span>工具：{approval.tool_name}</span>
+        <span>风险：{approval.risk}</span>
+        <span>系统：{String(approval.platform?.system ?? "")}</span>
+      </div>
+      <pre className="chat-tool-approval-args">
+        {JSON.stringify(approval.args, null, 2)}
+      </pre>
       <div className="button-row">
-        <button className="button subtle small-button" onClick={onContinue}>
-          继续
+        <button className="button primary small-button" onClick={onApprove}>
+          批准执行
+        </button>
+        <button className="button subtle small-button" onClick={onReject}>
+          拒绝
         </button>
       </div>
-      <textarea
-        className="input textarea"
-        rows={3}
-        placeholder="给当前流程补充指导"
-        value={interventionDraft}
-        onChange={(event) => onInterventionDraftChange(event.target.value)}
-      />
-      <button className="button primary small-button" onClick={onSubmitIntervention}>
-        注入指导
-      </button>
     </section>
   );
 }

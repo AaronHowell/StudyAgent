@@ -75,6 +75,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from langchain_openai import ChatOpenAI
+from qdrant_client import QdrantClient
 
 from usecases import RetrieveEvidenceUseCase
 from integrations import (
@@ -231,22 +232,31 @@ class AgentRuntime:
 
 def _build_mem0_llm_config(settings: AgentSettings) -> dict[str, object]:
     config: dict[str, object] = {
-        "model": settings.llm_model,
-        "api_key": settings.llm_api_key,
+        "model": settings.memory_llm_model,
+        "api_key": settings.memory_llm_api_key,
     }
     if settings.memory_llm_provider == "lmstudio":
-        config["lmstudio_base_url"] = settings.llm_base_url
+        config["lmstudio_base_url"] = settings.memory_llm_base_url
         # Mem0 requests json_object by default, but LM Studio-compatible backends in this
         # project only accept json_schema or text. Mem0 already instructs the model to emit
         # JSON and parses free-form text responses, so forcing text keeps the local path working.
         config["lmstudio_response_format"] = {"type": "text"}
     elif settings.memory_llm_provider == "openai":
-        config["openai_base_url"] = settings.llm_base_url
+        config["openai_base_url"] = settings.memory_llm_base_url
     elif settings.memory_llm_provider == "ollama":
-        config["ollama_base_url"] = settings.llm_base_url
+        config["ollama_base_url"] = settings.memory_llm_base_url
     elif settings.memory_llm_provider == "vllm":
-        config["vllm_base_url"] = settings.llm_base_url
+        config["vllm_base_url"] = settings.memory_llm_base_url
     return config
+
+
+def _build_memory_chat_model(settings: AgentSettings) -> ChatOpenAI:
+    return ChatOpenAI(
+        base_url=settings.memory_llm_base_url,
+        api_key=settings.memory_llm_api_key,
+        model=settings.memory_llm_model,
+        streaming=False,
+    )
 
 
 def _build_mem0_embedder_config(settings: AgentSettings) -> dict[str, object]:
@@ -302,6 +312,7 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
             port=parsed_qdrant_url.port or 6333,
             api_key=resolved.qdrant_api_key,
             timeout_seconds=resolved.qdrant_timeout_seconds,
+            trust_env=resolved.qdrant_trust_env,
             collection_name=resolved.qdrant_chunk_collection_name,
             asset_collection_name=resolved.qdrant_asset_collection_name,
             document_collection_name=resolved.qdrant_document_collection_name,
@@ -345,7 +356,7 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
     if resolved.memory_enabled and resolved.memory_backend == "markdown":
         memory_store = MarkdownMemoryStore(
             root_path=Path(resolved.memory_markdown_root).expanduser(),
-            selector=ChatModelMarkdownMemorySelector(chat_model=chat_model),
+            selector=ChatModelMarkdownMemorySelector(chat_model=_build_memory_chat_model(resolved)),
         )
     elif resolved.memory_enabled:
         history_db_path = Path(resolved.memory_history_db_path).expanduser()
@@ -353,13 +364,8 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
         memory_vector_config: dict[str, object] = {
             "collection_name": resolved.memory_vector_collection_name,
             "embedding_model_dims": resolved.memory_embedding_dims,
+            "client": _build_qdrant_client(resolved, parsed_qdrant_url),
         }
-        if resolved.qdrant_api_key:
-            memory_vector_config["url"] = resolved.qdrant_url
-            memory_vector_config["api_key"] = resolved.qdrant_api_key
-        else:
-            memory_vector_config["host"] = parsed_qdrant_url.hostname or "127.0.0.1"
-            memory_vector_config["port"] = parsed_qdrant_url.port or 6333
 
         memory_store = Mem0MemoryStore(
             config=Mem0MemoryConfig(
@@ -442,3 +448,21 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
         cache_store=cache_store,
     )
 
+
+def _build_qdrant_client(settings: AgentSettings, parsed_qdrant_url) -> QdrantClient:
+    """Build a Qdrant client with the same transport policy used by retrieval."""
+
+    if settings.qdrant_url:
+        return QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+            timeout=settings.qdrant_timeout_seconds,
+            trust_env=settings.qdrant_trust_env,
+        )
+    return QdrantClient(
+        host=parsed_qdrant_url.hostname or "127.0.0.1",
+        port=parsed_qdrant_url.port or 6333,
+        api_key=settings.qdrant_api_key or None,
+        timeout=settings.qdrant_timeout_seconds,
+        trust_env=settings.qdrant_trust_env,
+    )

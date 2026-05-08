@@ -98,6 +98,7 @@ class BaseSettings:
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: str = ""
     qdrant_timeout_seconds: int = 120
+    qdrant_trust_env: bool = False
     qdrant_chunk_collection_name: str = "paperlab_chunks"
     qdrant_asset_collection_name: str = "paperlab_assets"
     qdrant_document_collection_name: str = "paperlab_documents"
@@ -156,6 +157,7 @@ class BaseSettings:
             "qdrant_url": cls._env("PAPERLAB_QDRANT_URL", "STUDY_AGENT_QDRANT_URL", default="http://127.0.0.1:6333"),
             "qdrant_api_key": cls._env("PAPERLAB_QDRANT_API_KEY", "STUDY_AGENT_QDRANT_API_KEY", default=""),
             "qdrant_timeout_seconds": cls._int_env("PAPERLAB_QDRANT_TIMEOUT_SECONDS", "STUDY_AGENT_QDRANT_TIMEOUT_SECONDS", 120),
+            "qdrant_trust_env": cls._bool_env("PAPERLAB_QDRANT_TRUST_ENV", "STUDY_AGENT_QDRANT_TRUST_ENV", False),
             "qdrant_chunk_collection_name": cls._env(
                 "PAPERLAB_QDRANT_CHUNK_COLLECTION_NAME",
                 "STUDY_AGENT_QDRANT_CHUNK_COLLECTION_NAME",
@@ -256,6 +258,9 @@ class AgentSettings(BaseSettings):
     memory_vector_collection_name: str = "paperlab_memory"
     memory_embedding_dims: int = 1024
     memory_llm_provider: str = "lmstudio"
+    memory_llm_base_url: str = ""
+    memory_llm_api_key: str = ""
+    memory_llm_model: str = ""
     memory_embedder_provider: str = "lmstudio"
     web_search_enabled: bool = True
     web_search_result_limit: int = 5
@@ -283,6 +288,14 @@ class AgentSettings(BaseSettings):
     checkpoint_redis_checkpoint_write_prefix: str = "checkpoint_write"
     short_term_raw_turns: int = 3
     short_term_summary_turns: int = 4
+
+    def __post_init__(self) -> None:
+        if not self.memory_llm_base_url:
+            self.memory_llm_base_url = self.llm_base_url
+        if not self.memory_llm_api_key:
+            self.memory_llm_api_key = self.llm_api_key
+        if not self.memory_llm_model:
+            self.memory_llm_model = self.llm_model
 
     @classmethod
     def _json_env(cls, paperlab_name: str, legacy_name: str) -> list[dict[str, object]] | None:
@@ -336,6 +349,9 @@ class AgentSettings(BaseSettings):
             ),
             memory_embedding_dims=cls._int_env("PAPERLAB_MEMORY_EMBEDDING_DIMS", "STUDY_AGENT_MEMORY_EMBEDDING_DIMS", 1024),
             memory_llm_provider=cls._env("PAPERLAB_MEMORY_LLM_PROVIDER", "STUDY_AGENT_MEMORY_LLM_PROVIDER", default="lmstudio"),
+            memory_llm_base_url=cls._env("PAPERLAB_MEMORY_LLM_BASE_URL", "STUDY_AGENT_MEMORY_LLM_BASE_URL", default=""),
+            memory_llm_api_key=cls._env("PAPERLAB_MEMORY_LLM_API_KEY", "STUDY_AGENT_MEMORY_LLM_API_KEY", default=""),
+            memory_llm_model=cls._env("PAPERLAB_MEMORY_LLM_MODEL", "STUDY_AGENT_MEMORY_LLM_MODEL", default=""),
             memory_embedder_provider=cls._env(
                 "PAPERLAB_MEMORY_EMBEDDER_PROVIDER",
                 "STUDY_AGENT_MEMORY_EMBEDDER_PROVIDER",

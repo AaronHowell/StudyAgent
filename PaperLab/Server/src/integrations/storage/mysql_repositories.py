@@ -243,6 +243,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
             title TEXT NOT NULL,
             status VARCHAR(32) NOT NULL,
             content_hash VARCHAR(128) NOT NULL,
+            llm_title TEXT NOT NULL,
+            llm_metadata_json JSON NOT NULL,
             INDEX idx_documents_project_id (project_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """
@@ -258,8 +260,11 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
         """
 
         sql = """
-        INSERT INTO documents (id, project_id, path, file_name, doc_type, title, status, content_hash)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO documents (
+            id, project_id, path, file_name, doc_type, title, status,
+            content_hash, llm_title, llm_metadata_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             project_id = VALUES(project_id),
             path = VALUES(path),
@@ -267,7 +272,9 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
             doc_type = VALUES(doc_type),
             title = VALUES(title),
             status = VALUES(status),
-            content_hash = VALUES(content_hash);
+            content_hash = VALUES(content_hash),
+            llm_title = VALUES(llm_title),
+            llm_metadata_json = VALUES(llm_metadata_json);
         """
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -282,6 +289,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
                         document.title,
                         document.status.value,
                         document.content_hash,
+                        document.llm_title,
+                        self._dump_json(document.llm_metadata),
                     ),
                 )
 
@@ -296,7 +305,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
         """
 
         sql = """
-        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash
+        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash,
+               llm_title, llm_metadata_json
         FROM documents
         WHERE id = %s
         """
@@ -318,7 +328,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
         """
 
         sql = """
-        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash
+        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash,
+               llm_title, llm_metadata_json
         FROM documents
         WHERE project_id = %s AND path = %s
         LIMIT 1
@@ -326,6 +337,22 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(sql, (project_id, path))
+                row = cursor.fetchone()
+        return self._row_to_document(row)
+
+    def get_by_content_hash(self, project_id: str, content_hash: str) -> Document | None:
+        """Load one document by project id and content hash."""
+
+        sql = """
+        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash,
+               llm_title, llm_metadata_json
+        FROM documents
+        WHERE project_id = %s AND content_hash = %s
+        LIMIT 1
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, (project_id, content_hash))
                 row = cursor.fetchone()
         return self._row_to_document(row)
 
@@ -340,7 +367,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
         """
 
         sql = """
-        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash
+        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash,
+               llm_title, llm_metadata_json
         FROM documents
         WHERE project_id = %s
         ORDER BY title ASC
@@ -359,7 +387,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
 
         placeholders = ", ".join(["%s"] * len(document_ids))
         sql = f"""
-        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash
+        SELECT id, project_id, path, file_name, doc_type, title, status, content_hash,
+               llm_title, llm_metadata_json
         FROM documents
         WHERE id IN ({placeholders})
         """
@@ -403,6 +432,8 @@ class MySQLDocumentRepository(MySQLRepositoryBase):
             title=row["title"],
             status=DocumentStatus(row["status"]),
             content_hash=row["content_hash"],
+            llm_title=row.get("llm_title") or "",
+            llm_metadata=MySQLRepositoryBase._load_json(row.get("llm_metadata_json"), {}),
         )
 
 

@@ -118,6 +118,8 @@ class Document:
     title: str
     status: DocumentStatus
     content_hash: str
+    llm_title: str = ""
+    llm_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

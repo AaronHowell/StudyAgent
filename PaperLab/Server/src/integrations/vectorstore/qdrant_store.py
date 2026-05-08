@@ -47,6 +47,7 @@ class QdrantConnectionConfig:
     url: str = ""
     api_key: str = ""
     timeout_seconds: float = 120.0
+    trust_env: bool = False
     collection_name: str = "paperlab_chunks"
     asset_collection_name: str = "paperlab_assets"
     document_collection_name: str = "paperlab_documents"
@@ -77,6 +78,7 @@ class QdrantChunkVectorStore:
                 url=config.url,
                 api_key=config.api_key or None,
                 timeout=config.timeout_seconds,
+                trust_env=config.trust_env,
             )
         else:
             self.client = QdrantClient(
@@ -84,6 +86,7 @@ class QdrantChunkVectorStore:
                 port=config.port,
                 api_key=config.api_key or None,
                 timeout=config.timeout_seconds,
+                trust_env=config.trust_env,
             )
 
     def ensure_collection(self, vector_size: int) -> None:

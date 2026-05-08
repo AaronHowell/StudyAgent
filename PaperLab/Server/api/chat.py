@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.messages import SystemMessage
 from langgraph.types import Command
 
+from api.schemas import ChatGuidanceRequest
 from api.schemas import ChatInterruptPayload
 from api.schemas import ChatMessageInput
 from api.schemas import ChatMessagePayload
@@ -35,6 +36,7 @@ from api.chat_turns import serialize_trace_message_event
 from api.config import Settings
 from configs import DEFAULT_PROJECT_ID
 from configs import DEFAULT_THREAD_ID
+from orchestration.guidance_queue import push_guidance_message
 from orchestration.supervisor import graph
 from session_storage import SessionCheckpoint
 from session_storage import SessionStorageService
@@ -53,13 +55,14 @@ def get_session_storage() -> SessionStorageService:
     return SessionStorageService(root_dir=Path(settings.session_storage_dir).expanduser())
 
 
-def _thread_config(*, project_id: str, thread_id: str) -> dict[str, Any]:
+def _thread_config(*, project_id: str, thread_id: str, tools_enabled: bool = False) -> dict[str, Any]:
     resolved_project_id = str(project_id or "").strip() or DEFAULT_PROJECT_ID
     resolved_thread_id = str(thread_id or "").strip() or DEFAULT_THREAD_ID
     return {
         "configurable": {
             "project_id": resolved_project_id,
             "thread_id": resolved_thread_id,
+            "tools_enabled": tools_enabled,
         }
     }
 
@@ -248,8 +251,15 @@ def _persist_session_snapshot(
         project_id=request.project_id,
         session_id=request.thread_id,
     )
+    # Persist tool trace messages as well so restored sessions can rebuild
+    # the reasoning panel from storage.
+    persistable = [
+        m
+        for m in snapshot.messages
+        if (m.role or m.type) in {"human", "user", "ai", "assistant", "tool", "system"}
+    ]
     existing_count = len(restored.messages)
-    for message in snapshot.messages[existing_count:]:
+    for message in persistable[existing_count:]:
         service.append_message(
             project_id=request.project_id,
             session_id=request.thread_id,
@@ -364,6 +374,18 @@ def restore_session_snapshot(
     )
 
 
+@session_router.delete("/sessions/{session_id}")
+def delete_session(
+    *,
+    session_id: str,
+    project_id: str = Query(..., description="Target project identifier"),
+) -> dict[str, bool]:
+    deleted = get_session_storage().delete_session(project_id=project_id, session_id=session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": True}
+
+
 @session_router.get(
     "/sessions/{session_id}/workers/{agent_id}",
     response_model=list[WorkerEventResponse],
@@ -396,7 +418,11 @@ def get_worker_events(
 
 @router.post("/stream")
 async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
-    config = _thread_config(project_id=request.project_id, thread_id=request.thread_id)
+    config = _thread_config(
+        project_id=request.project_id,
+        thread_id=request.thread_id,
+        tools_enabled=request.tools_enabled,
+    )
     graph_input = _coerce_graph_input(request)
 
     async def event_stream():
@@ -499,3 +525,16 @@ async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/guidance")
+async def queue_chat_guidance(request: ChatGuidanceRequest) -> dict[str, bool]:
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Guidance content cannot be empty.")
+    push_guidance_message(
+        project_id=request.project_id,
+        thread_id=request.thread_id,
+        content=content,
+    )
+    return {"queued": True}

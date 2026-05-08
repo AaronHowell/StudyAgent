@@ -19,7 +19,7 @@ def build_main_route_messages(
     """Build the coordinator routing prompt."""
 
     prompt_parts = [
-        "Decide whether to dispatch retrieval, tool, and/or workspace specialists.",
+        "Decide whether to dispatch memory recall, retrieval, and/or external tool specialists.",
         f"Question:\n{question}",
     ]
     if short_term_context:
@@ -36,9 +36,18 @@ def build_main_route_messages(
             + "\n".join(f"- {item}" for item in assessment_lines)
         )
     prompt_parts.append(
+        "Dispatch memory recall only when prior user/project preferences or earlier conversation facts are likely needed. "
+        "Dispatch retrieval only when project-grounded paper evidence is actually needed. "
         "Use retrieval for project-grounded paper evidence. "
         "Use the tool specialist for web or MCP-backed external information. "
-        "Use the workspace specialist for repository files and local edits."
+        "If local file tools are enabled later in the answer stage, use them directly instead of dispatching a workspace specialist.\n\n"
+        "Retrieval capacity notes:\n"
+        "- Each retrieval call returns up to 5 text chunks and 6 visual assets (figures, tables). "
+        "This limit is per-retrieval, not per-turn.\n"
+        "- If the first retrieval does not cover enough ground, you can dispatch another retrieval task "
+        "with a different query to gather additional evidence in the same turn.\n"
+        "- Visual assets (figures, tables, diagrams) are retrieved alongside text chunks. "
+        "When the question references figures, tables, or visual content, make sure to dispatch a retrieval task."
     )
     return (
         "You are the coordinator for weak speculative multi-agent dispatch.",
@@ -75,7 +84,11 @@ def build_synthesis_prompt(
         "`done` should briefly state what this step completed. "
         "`next` should state the most useful next follow-up. "
         "`pending` should state what is still missing, uncertain, or not yet done. "
-        "Do not include chain-of-thought or extra keys."
+        "Do not include chain-of-thought or extra keys.\n\n"
+        "When referencing figures, tables, or diagrams from the retrieved assets, "
+        "use inline tags like <ref pic>A1</ref pic>, <ref pic>A2</ref pic>, etc. "
+        "where the ref_id matches the asset's ref_id from the retrieval results. "
+        "This allows the frontend to render the image inline with your answer."
     )
     return "\n\n".join(synthesis_parts)
 
@@ -117,6 +130,8 @@ def build_answer_or_continue_prompt(
         "`done`, `next`, and `pending` in `summary`, and set `next_tasks` to an empty list. "
         "If evidence is insufficient and the loop can continue, do not answer; call the virtual "
         "`continue_evidence_loop` tool with a reason and concrete follow-up evidence tasks. "
+        "For inventory/basic-info questions such as listing uploaded papers or document titles, "
+        "document-level metadata is sufficient evidence; do not require chunk quotations or asset retrieval. "
         "Do not include chain-of-thought or extra keys."
     )
     return "\n\n".join(prompt_parts)
@@ -178,5 +193,3 @@ def build_workspace_agent_selection_messages(*, task_query: str, reason: str) ->
         "Use finish only when acceptance criteria are met or a blocker prevents further progress.",
         f"Task query and implementation state:\n{task_query}\n\nReason:\n{reason}",
     )
-
-

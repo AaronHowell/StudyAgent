@@ -6,6 +6,8 @@ export function ChatComposer({
   onChange,
   onSend,
   onStop,
+  toolsEnabled,
+  onToolsEnabledChange,
   isLoading,
   placeholder,
 }: {
@@ -13,6 +15,8 @@ export function ChatComposer({
   onChange: (v: string) => void;
   onSend: () => void;
   onStop: () => void;
+  toolsEnabled: boolean;
+  onToolsEnabledChange: (enabled: boolean) => void;
   isLoading: boolean;
   placeholder: string;
 }) {
@@ -41,6 +45,14 @@ export function ChatComposer({
           </span>
         </div>
         <div className="chat-composer-right">
+          <label className="chat-tools-toggle">
+            <input
+              type="checkbox"
+              checked={toolsEnabled}
+              onChange={(e) => onToolsEnabledChange(e.target.checked)}
+            />
+            工具
+          </label>
           {isLoading ? (
             <button className="btn btn-sm" onClick={onStop}>
               <Square size={12} />

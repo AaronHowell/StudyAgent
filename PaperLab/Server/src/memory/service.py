@@ -46,7 +46,23 @@ def _normalize_for_summary(message: BaseMessage) -> str:
 
 
 def _conversation_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
-    return [message for message in messages if getattr(message, "type", "") in {"human", "ai"}]
+    return [
+        message
+        for message in messages
+        if getattr(message, "type", "") in {"human", "ai"}
+        and (
+            not _artifact_type(message)
+            or _artifact_type(message) == "answer"
+        )
+    ]
+
+
+def _artifact_type(message: BaseMessage) -> str:
+    additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+    metadata = dict(additional_kwargs).get("metadata", {}) or {}
+    if isinstance(metadata, dict):
+        return str(metadata.get("artifact_type") or "")
+    return ""
 
 
 class MemoryService:

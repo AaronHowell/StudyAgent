@@ -62,6 +62,7 @@ def test_multimodal_message_builder_uses_image_blocks_only_when_enabled() -> Non
                 ref_id="C1",
                 chunk_id="chunk-1",
                 document_id="doc-1",
+                document_title="Example Paper",
                 page=2,
                 text="The paper reports the result in Figure 1.",
             )
@@ -71,6 +72,7 @@ def test_multimodal_message_builder_uses_image_blocks_only_when_enabled() -> Non
                 ref_id="A1",
                 asset_id="asset-1",
                 document_id="doc-1",
+                document_title="Example Paper",
                 page=3,
                 caption="Figure 1: Accuracy comparison.",
                 summary="A line chart comparing accuracy.",

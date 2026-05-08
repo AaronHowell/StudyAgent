@@ -1,4 +1,4 @@
-import { FileText, Play, RotateCw } from "lucide-react";
+import { FileText, Play, RotateCw, Sparkles } from "lucide-react";
 import type { ScannedDocument } from "../../types";
 import { StatusBadge } from "../common/StatusBadge";
 
@@ -7,18 +7,22 @@ export function PaperCard({
   state,
   selected,
   ingesting,
+  metadataRefreshing,
   onSelect,
   onOpen,
   onIngest,
+  onRefreshMetadata,
   onContextMenu,
 }: {
   document: ScannedDocument;
   state: string;
   selected: boolean;
   ingesting: boolean;
+  metadataRefreshing: boolean;
   onSelect: () => void;
   onOpen: () => void;
   onIngest: () => void;
+  onRefreshMetadata: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
   return (
@@ -37,8 +41,11 @@ export function PaperCard({
       </div>
 
       <div className="paper-card-meta">
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="paper-card-status">
           <StatusBadge state={state} />
+          {document.metadata_source === "llm" ? (
+            <span className="badge badge-info" title="已复用 LLM 元数据缓存">LLM</span>
+          ) : null}
           <span className="paper-card-date">{formatDate(document.modified_at)}</span>
         </div>
         <div className="paper-card-actions">
@@ -58,6 +65,15 @@ export function PaperCard({
           >
             <RotateCw size={12} />
             {document.ingested ? "重入库" : "入库"}
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            disabled={metadataRefreshing}
+            onClick={(e) => { e.stopPropagation(); onRefreshMetadata(); }}
+            title="用 LLM 解析元数据"
+          >
+            <Sparkles size={12} />
+            {metadataRefreshing ? "解析中" : "元数据"}
           </button>
         </div>
       </div>

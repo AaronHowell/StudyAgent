@@ -1,8 +1,13 @@
-import { useState } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { ArrowLeft, ImageIcon, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import type { ScannedDocument } from "../../types";
 import { PdfViewer } from "./PdfViewer";
 import { ChatPanel } from "../chat/ChatPanel";
+
+const NOTES_WIDTH = 260;
+const CHAT_MIN_WIDTH = 280;
+const CHAT_DEFAULT_RATIO = 0.28;
+const HANDLE_WIDTH = 4;
 
 export function PaperReader({
   document,
@@ -23,14 +28,48 @@ export function PaperReader({
 }) {
   const [notesOpen, setNotesOpen] = useState(true);
   const [chatOpen, setChatOpen] = useState(true);
+  const [chatWidth, setChatWidth] = useState<number | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  const gridCols = notesOpen && chatOpen
-    ? "260px 1fr 380px"
-    : notesOpen
-      ? "260px 1fr 40px"
-      : chatOpen
-        ? "40px 1fr 380px"
-        : "40px 1fr 40px";
+  // Initialize chat width from container size
+  useEffect(() => {
+    if (bodyRef.current && chatWidth === null) {
+      const bodyWidth = bodyRef.current.getBoundingClientRect().width;
+      const available = bodyWidth - (notesOpen ? NOTES_WIDTH : 40) - HANDLE_WIDTH;
+      setChatWidth(Math.max(CHAT_MIN_WIDTH, Math.round(available * CHAT_DEFAULT_RATIO)));
+    }
+  }, [chatOpen, notesOpen, chatWidth]);
+
+  const handleDragStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      dragRef.current = { startX: e.clientX, startWidth: chatWidth ?? 380 };
+
+      const onMove = (ev: MouseEvent) => {
+        if (!dragRef.current || !bodyRef.current) return;
+        const bodyRect = bodyRef.current.getBoundingClientRect();
+        const totalAvailable = bodyRect.width - (notesOpen ? NOTES_WIDTH : 40) - HANDLE_WIDTH;
+        const delta = dragRef.current.startX - ev.clientX;
+        const newWidth = Math.max(CHAT_MIN_WIDTH, Math.min(totalAvailable - CHAT_MIN_WIDTH, dragRef.current.startWidth + delta));
+        setChatWidth(newWidth);
+      };
+
+      const onUp = () => {
+        dragRef.current = null;
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [chatWidth, notesOpen],
+  );
+
+  const notesCol = notesOpen ? `${NOTES_WIDTH}px` : "40px";
+  const chatCol = chatOpen ? `${chatWidth ?? 380}px` : "40px";
+  const gridCols = `${notesCol} 1fr ${chatOpen ? HANDLE_WIDTH + "px " : ""}${chatCol}`;
 
   return (
     <div className="reader-container">
@@ -59,8 +98,8 @@ export function PaperReader({
         </div>
       </div>
 
-      {/* 3-column layout: notes | pdf | chat */}
-      <div className="reader-body" style={{ gridTemplateColumns: gridCols }}>
+      {/* 3-column layout: notes | pdf | (handle) | chat */}
+      <div className="reader-body" ref={bodyRef} style={{ gridTemplateColumns: gridCols }}>
         {/* Notes panel */}
         {notesOpen ? (
           <div className="reader-notes-panel">
@@ -97,6 +136,15 @@ export function PaperReader({
             </div>
           )}
         </div>
+
+        {/* Drag handle */}
+        {chatOpen ? (
+          <div
+            className="reader-resize-handle"
+            onMouseDown={handleDragStart}
+            title="拖拽调整对话宽度"
+          />
+        ) : null}
 
         {/* Chat panel */}
         {chatOpen ? (

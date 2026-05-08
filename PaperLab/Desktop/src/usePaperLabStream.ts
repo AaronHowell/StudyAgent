@@ -87,6 +87,7 @@ type SnapshotPayload<TInterrupt extends Record<string, unknown>> = {
 type SubmitOptions = {
   projectId: string;
   threadId?: string;
+  toolsEnabled?: boolean;
   command?: {
     update?: {
       messages?: Array<{ type: string; content: string }>;
@@ -116,8 +117,10 @@ type UsePaperLabStreamResult<TInterrupt extends Record<string, unknown>> = {
   isLoading: boolean;
   error: Error | null;
   submit: (input: StreamSubmitInput, options: SubmitOptions) => Promise<void>;
+  queueGuidance: (options: { projectId: string; threadId?: string; content: string; optimisticTurn?: ChatTurn }) => Promise<void>;
   restoreSession: (options: LoadStateOptions) => Promise<void>;
   listSessions: (projectId: string) => Promise<ChatSessionSummary[]>;
+  deleteSession: (options: { projectId: string; sessionId: string }) => Promise<void>;
   stop: () => void;
   resetThread: (threadId?: string | null) => void;
   toggleTurnCollapsed: (turnId: string) => void;
@@ -203,7 +206,7 @@ function ensureAssistantTurn(turns: ChatTurn[], event: AssistantTurnStartedEvent
       created_at: event.created_at,
       answer_text: "",
       status: "streaming",
-      collapsed: false,
+      collapsed: true,
       trace_items: [],
       citations: [],
       asset_citations: [],
@@ -213,6 +216,19 @@ function ensureAssistantTurn(turns: ChatTurn[], event: AssistantTurnStartedEvent
       summary: { done: "", next: "", pending: "" },
     },
   ];
+}
+
+function upsertTraceItem(items: ChatTraceItem[], next: ChatTraceItem): ChatTraceItem[] {
+  const existingIndex = items.findIndex((item) => item.id === next.id);
+  if (existingIndex === -1) return [...items, next];
+  return items.map((item, index) => (index === existingIndex ? { ...item, ...next } : item));
+}
+
+function appendTraceDelta(current: string, delta: string): string {
+  if (!delta) return current;
+  if (!current) return delta;
+  if (current === delta || current.endsWith(delta)) return current;
+  return `${current}${delta}`;
 }
 
 export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
@@ -277,6 +293,20 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
     [apiBaseUrl],
   );
 
+  const deleteSession = useCallback(
+    async ({ projectId, sessionId }: { projectId: string; sessionId: string }) => {
+      const response = await fetch(
+        `${apiBaseUrl}/sessions/${encodeURIComponent(sessionId)}?project_id=${encodeURIComponent(projectId)}`,
+        { method: "DELETE" },
+      );
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+    },
+    [apiBaseUrl],
+  );
+
   const toggleTurnCollapsed = useCallback((turnId: string) => {
     setTurns((current) =>
       current.map((turn) =>
@@ -322,6 +352,7 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
             project_id: options.projectId,
             input,
             command: options.command,
+            tools_enabled: Boolean(options.toolsEnabled),
           }),
           signal: controller.signal,
         });
@@ -377,8 +408,8 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
                   turn.id === event.turn_id
                     ? {
                         ...turn,
-                        trace_items: [...(turn.trace_items ?? []), event.item],
-                        collapsed: false,
+                        trace_items: upsertTraceItem(turn.trace_items ?? [], event.item),
+                        collapsed: true,
                         status: "streaming",
                       }
                     : turn,
@@ -398,7 +429,7 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
                           item.id === event.item_id
                             ? {
                                 ...item,
-                                text: `${item.text}${event.delta}`,
+                                text: appendTraceDelta(item.text, event.delta),
                               }
                             : item,
                         ),
@@ -457,12 +488,12 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
                         ...event.turn,
                         status: "completed",
                         collapsed: true,
-                        summary: event.summary ?? turn.summary,
-                        citations: event.citations ?? turn.citations,
-                        asset_citations: event.asset_citations ?? turn.asset_citations,
-                        asset_sources: event.asset_sources ?? turn.asset_sources,
-                        web_sources: event.web_sources ?? turn.web_sources,
-                        tool_sources: event.tool_sources ?? turn.tool_sources,
+                        summary: event.summary ?? event.turn?.summary ?? turn.summary,
+                        citations: event.citations ?? event.turn?.citations ?? turn.citations,
+                        asset_citations: event.turn?.asset_citations ?? turn.asset_citations,
+                        asset_sources: event.turn?.asset_sources ?? turn.asset_sources,
+                        web_sources: event.web_sources ?? event.turn?.web_sources ?? turn.web_sources,
+                        tool_sources: event.tool_sources ?? event.turn?.tool_sources ?? turn.tool_sources,
                       }
                     : turn,
                 ),
@@ -491,6 +522,42 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
     [apiBaseUrl, stop, threadId],
   );
 
+  const queueGuidance = useCallback(
+    async ({
+      projectId,
+      threadId: targetThreadId,
+      content,
+      optimisticTurn,
+    }: {
+      projectId: string;
+      threadId?: string;
+      content: string;
+      optimisticTurn?: ChatTurn;
+    }) => {
+      const normalized = content.trim();
+      if (!normalized) return;
+      const currentThreadId = targetThreadId || threadId;
+      const response = await fetch(`${apiBaseUrl}/chat/guidance`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          project_id: projectId,
+          thread_id: currentThreadId,
+          content: normalized,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      if (optimisticTurn) {
+        setTurns((current) => [...current, optimisticTurn]);
+      }
+    },
+    [apiBaseUrl, threadId],
+  );
+
   return useMemo(
     () => ({
       threadId,
@@ -499,12 +566,14 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
       isLoading,
       error,
       submit,
+      queueGuidance,
       restoreSession,
       listSessions,
+      deleteSession,
       stop,
       resetThread,
       toggleTurnCollapsed,
     }),
-    [threadId, turns, interrupt, isLoading, error, submit, restoreSession, listSessions, stop, resetThread, toggleTurnCollapsed],
+    [threadId, turns, interrupt, isLoading, error, submit, queueGuidance, restoreSession, listSessions, deleteSession, stop, resetThread, toggleTurnCollapsed],
   );
 }

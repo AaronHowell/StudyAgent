@@ -77,6 +77,8 @@ def build_turns_from_messages(messages: list[BaseMessage]) -> list[ChatTurnRespo
             assistant_turn.collapsed = bool(assistant_turn.trace_items)
             assistant_turn.summary = _normalize_summary(metadata.get("summary"))
             assistant_turn.citations = _normalize_list_of_dicts(metadata.get("citations"))
+            assistant_turn.asset_citations = _normalize_list_of_dicts(metadata.get("asset_citations"))
+            assistant_turn.asset_sources = _normalize_list_of_dicts(metadata.get("asset_sources"))
             assistant_turn.web_sources = _normalize_list_of_dicts(metadata.get("web_sources"))
             assistant_turn.tool_sources = _normalize_list_of_dicts(metadata.get("tool_sources"))
 
@@ -107,6 +109,17 @@ def build_trace_item(message: BaseMessage, *, index: int) -> ChatTraceItemRespon
         title = "记忆检索"
     elif artifact_type == "short_term_context":
         title = "短时上下文"
+    elif artifact_type == "workspace_tool_result":
+        kind = "tool_result"
+        title = str(metadata.get("tool_name") or "工具结果")
+    elif artifact_type == "retrieval_reasoning":
+        title = "检索思路"
+    elif artifact_type == "retrieval_tool_call":
+        kind = "tool_call"
+        title = str(metadata.get("tool_name") or "检索工具")
+    elif artifact_type == "retrieval_tool_result":
+        kind = "tool_result"
+        title = str(metadata.get("tool_name") or "检索结果")
 
     return ChatTraceItemResponse(
         id=str(getattr(message, "id", "") or f"trace-{index}"),

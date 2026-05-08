@@ -1,6 +1,7 @@
 """PaperLab main LangGraph orchestration graph."""
 
 import asyncio
+from pathlib import Path
 from typing import Annotated
 from typing import Any
 from typing import Literal
@@ -38,6 +39,7 @@ from orchestration.graph_messages import (
     _result_status,
     _stringify_for_prompt,
 )
+from orchestration.guidance_queue import pop_guidance_messages
 from orchestration.graph_serialization import (
     build_assistant_metadata,
     _serialize_evidence_pack,
@@ -53,8 +55,8 @@ from workers.retriever.agent import build_retrieve_agent_graph
 from workers.retriever.agent import run_retrieve_specialist
 from workers.tool.agent import build_tool_agent_graph
 from workers.tool.agent import run_tool_specialist
-from workers.workspace.agent import build_workspace_agent_graph
-from workers.workspace.agent import run_workspace_specialist
+from workspace.tools import build_tool_approval_request
+from workspace.tools import execute_workspace_tool
 
 try:
     from langchain_core.messages import AIMessage
@@ -100,10 +102,8 @@ class LoopInterruptPayload(TypedDict, total=False):
     pending_user_messages: int
     retrieve_task: dict[str, Any] | None
     tool_task: dict[str, Any] | None
-    workspace_task: dict[str, Any] | None
     retrieve_result_status: str
     tool_result_status: str
-    workspace_result_status: str
 
 
 def _checkpoint_redis_url(settings: AgentSettings) -> str:
@@ -153,7 +153,6 @@ def _build_loop_interrupt_payload(
     processed_count = int(state.get("processed_human_message_count", 0) or 0)
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
     tool_result = dict(state.get("tool_result", {}) or {})
-    workspace_result = dict(state.get("workspace_result", {}) or {})
     return {
         "phase": phase,
         "turn_id": str(state.get("active_turn_id") or ""),
@@ -162,12 +161,8 @@ def _build_loop_interrupt_payload(
         "pending_user_messages": max(0, len(human_messages) - processed_count),
         "retrieve_task": state.get("retrieve_task").to_dict() if state.get("retrieve_task") else None,
         "tool_task": state.get("tool_task").to_dict() if state.get("tool_task") else None,
-        "workspace_task": (
-            state.get("workspace_task").to_dict() if state.get("workspace_task") else None
-        ),
         "retrieve_result_status": _result_status(retrieve_result),
         "tool_result_status": _result_status(tool_result),
-        "workspace_result_status": _result_status(workspace_result),
     }
 
 
@@ -203,6 +198,102 @@ def _answer_or_loop_schema() -> list[dict[str, object]]:
                         },
                     },
                     "required": ["reason", "next_tasks"],
+                },
+            },
+        },
+    ]
+
+
+def _main_workspace_tool_schema() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "detect_platform",
+                "description": "Detect the current server operating system and available file search tools.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files or directories under the workspace root.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_files",
+                "description": "Find files by pattern under the workspace root.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"pattern": {"type": "string"}, "limit": {"type": "integer"}},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_text",
+                "description": "Search text in workspace files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}},
+                    "required": ["pattern"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read one UTF-8 workspace file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "max_chars": {"type": "integer"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "mkdir",
+                "description": "Create a directory under the workspace root. Requires user approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write a UTF-8 file under the workspace root. Requires user approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a single command in the workspace root. Requires user approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer"}},
+                    "required": ["command"],
                 },
             },
         },
@@ -294,6 +385,53 @@ def _parse_memory_write_decision(raw_answer: Any) -> dict[str, object]:
     }
 
 
+def _coerce_tool_approval_decision(value: Any) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {"action": "reject"}
+    action = str(value.get("action") or "").strip().lower()
+    if action not in {"approve", "reject", "edit"}:
+        action = "reject"
+    if action == "edit" and isinstance(value.get("args"), dict):
+        return {"action": "edit", "args": dict(value["args"])}
+    return {"action": action}
+
+
+def _execute_main_workspace_tool(tool_call: dict[str, Any]) -> dict[str, object]:
+    tool_name = str(tool_call.get("name") or "")
+    args = _coerce_tool_call_args(tool_call)
+    approval = build_tool_approval_request(
+        tool_call_id=str(tool_call.get("id") or f"main_tool_{uuid4().hex[:8]}"),
+        tool_name=tool_name,
+        args=args,
+    )
+    if approval is not None and interrupt is not None:
+        resume_value = interrupt(
+            {
+                "type": "tool_approval",
+                "question": approval.preview,
+                "approval": approval.to_dict(),
+            }
+        )
+        decision = _coerce_tool_approval_decision(resume_value)
+        if decision["action"] == "reject":
+            return {
+                "tool_name": tool_name,
+                "args": args,
+                "status": "rejected",
+                "summary": f"Tool call rejected: {approval.preview}",
+                "content": "",
+            }
+        if isinstance(decision.get("args"), dict):
+            args = dict(decision["args"])
+    result = execute_workspace_tool(root=Path.cwd(), tool_name=tool_name, args=args)
+    return {
+        "tool_name": tool_name,
+        "args": args,
+        "status": "completed",
+        **result,
+    }
+
+
 def _coerce_memory_type(value: object) -> MemoryType:
     try:
         return MemoryType(str(value))
@@ -377,6 +515,26 @@ def _pending_human_messages_from_resume(resume_value: Any) -> list[HumanMessage]
             continue
         pending.append(HumanMessage(content=content))
     return pending
+
+
+def _resume_value_from_guidance_queue(
+    *,
+    config: RunnableConfig | None,
+) -> dict[str, object]:
+    request_config = resolve_agent_request_config(dict(config or {}))
+    queued_messages = pop_guidance_messages(
+        project_id=request_config.project_id,
+        thread_id=request_config.thread_id,
+    )
+    if not queued_messages:
+        return {"action": "continue"}
+    return {
+        "action": "continue_with_guidance",
+        "pending_messages": [
+            {"type": "human", "content": message}
+            for message in queued_messages
+        ],
+    }
 
 
 async def thread_lock_node(
@@ -583,9 +741,7 @@ def guidance_gate_pre_route_node(
 ) -> Command[Literal["main_route"]]:
     """Pause before main routing so the UI can inject new guidance."""
 
-    resume_value = None
-    if interrupt is not None:
-        resume_value = interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_pre_route"))
+    resume_value = _resume_value_from_guidance_queue(config=config)
     return Command(
         update=_materialize_intervention_update(
             state=state,
@@ -607,8 +763,8 @@ async def main_route_node(
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     messages = list(state.get("messages", []))
     question = _latest_human_text(messages)
-    short_term_message = _latest_tool_message(messages, "build_short_term_context")
-    memory_message = _latest_tool_message(messages, "search_memory")
+    short_term_message = _latest_tool_message(messages, "build_short_term_context", turn_id=turn_id)
+    memory_message = _latest_tool_message(messages, "search_memory", turn_id=turn_id)
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
     assessment_guidance = _latest_assessment_guidance(messages, turn_id=turn_id)
 
@@ -629,20 +785,18 @@ async def main_route_node(
     tool_calls = _extract_tool_calls(response)
     args = _coerce_tool_call_args(tool_calls[0]) if tool_calls else {}
 
-    run_retrieval = bool(args.get("run_retrieval", True))
+    run_memory = bool(args.get("run_memory", False))
+    memory_query = str(args.get("memory_query") or question)
+    memory_reason = str(args.get("memory_reason") or "Need earlier user or project context.")
+    run_retrieval = bool(args.get("run_retrieval", False))
     retrieval_query = str(args.get("retrieval_query") or question)
     retrieval_reason = str(args.get("retrieval_reason") or "Need project-grounded evidence.")
     run_tool = bool(args.get("run_tool", False))
     tool_query = str(args.get("tool_query") or question)
     tool_reason = str(args.get("tool_reason") or "Need external or tool-based information.")
-    run_workspace = bool(args.get("run_workspace", False))
-    workspace_query = str(args.get("workspace_query") or question)
-    workspace_reason = str(args.get("workspace_reason") or "Need local workspace inspection.")
-
     task_messages: list[BaseMessage] = []
     retrieve_task: AgentTask | None = None
     tool_task: AgentTask | None = None
-    workspace_task: AgentTask | None = None
 
     if run_retrieval:
         retrieve_task = AgentTask(
@@ -675,42 +829,9 @@ async def main_route_node(
         )
         task_messages.append(_build_agent_task_message(turn_id=turn_id, task=tool_task))
 
-    if run_workspace:
-        workspace_task = AgentTask(
-            task_id=f"task_workspace_{uuid4().hex[:8]}",
-            task_type="implementation",
-            agent_name="workspace_agent",
-            query=workspace_query,
-            reason=workspace_reason,
-            constraints={
-                "objective": workspace_query,
-                "plan": [
-                    "Inspect the relevant workspace files and context.",
-                    "Apply the smallest scoped implementation needed for the objective.",
-                    "Run focused verification that matches the acceptance criteria.",
-                    "Prepare a concise implementation report.",
-                ],
-                "acceptance_criteria": [
-                    "The implementation directly addresses the workspace objective.",
-                    "Changed files are listed in the implementation report.",
-                    "Relevant verification results or blockers are reported.",
-                ],
-                "constraints": [
-                    "Keep mutable work inside the sandbox task workspace.",
-                    "Avoid unrelated refactors.",
-                    "Prefer focused commands and file reads over broad repository scans.",
-                ],
-                "workspace_root": ".",
-                "source_path": ".",
-                "max_steps": 8,
-            },
-            metadata={},
-        )
-        task_messages.append(_build_agent_task_message(turn_id=turn_id, task=workspace_task))
-
     dispatched_agents = [
         task.agent_name
-        for task in (retrieve_task, tool_task, workspace_task)
+        for task in (retrieve_task, tool_task)
         if task is not None
     ]
     task_messages.append(
@@ -719,22 +840,24 @@ async def main_route_node(
             phase="main_route_complete",
             summary=(
                 "MainRoute prepared "
+                + ("memory recall, " if run_memory else "")
                 + (", ".join(dispatched_agents) if dispatched_agents else "no specialists")
                 + "."
             ),
             iteration_count=int(state.get("iteration_count", 0) or 0) + 1,
-            metadata={"dispatched_agents": dispatched_agents},
+            metadata={"dispatched_agents": dispatched_agents, "run_memory": run_memory},
         )
     )
     return {
         "messages": task_messages,
         "iteration_count": int(state.get("iteration_count", 0) or 0) + 1,
+        "run_memory": run_memory,
+        "memory_query": memory_query,
+        "memory_reason": memory_reason,
         "retrieve_task": retrieve_task,
         "tool_task": tool_task,
-        "workspace_task": workspace_task,
         "retrieve_result": None,
         "tool_result": None,
-        "workspace_result": None,
         "answer_confident": False,
         "stop_reason": "",
     }
@@ -746,9 +869,7 @@ def guidance_gate_post_route_node(
 ) -> Command[Literal["parallel_specialists"]]:
     """Pause after routing and before specialist execution."""
 
-    resume_value = None
-    if interrupt is not None:
-        resume_value = interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_post_route"))
+    resume_value = _resume_value_from_guidance_queue(config=config)
     return Command(
         update=_materialize_intervention_update(
             state=state,
@@ -764,12 +885,11 @@ async def parallel_specialists_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
-    """Run retrieval, tool, and workspace specialists concurrently for one routing iteration."""
+    """Run retrieval and external tool specialists concurrently for one routing iteration."""
 
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     retrieve_task = state.get("retrieve_task")
     tool_task = state.get("tool_task")
-    workspace_task = state.get("workspace_task")
 
     async def run_retrieval() -> tuple[AgentResult | None, list[BaseMessage]]:
         if retrieve_task is None:
@@ -795,31 +915,16 @@ async def parallel_specialists_node(
             config=config,
         )
 
-    async def run_workspace() -> tuple[AgentResult | None, list[BaseMessage]]:
-        if workspace_task is None:
-            return None, []
-        return await _invoke_specialist_subgraph(
-            graph=workspace_agent_graph,
-            task_key="workspace_task",
-            result_key="workspace_result",
-            task=workspace_task,
-            turn_id=turn_id,
-            config=config,
-        )
-
-    retrieval_output, tool_output, workspace_output = await asyncio.gather(
+    retrieval_output, tool_output = await asyncio.gather(
         run_retrieval(),
         run_tool(),
-        run_workspace(),
     )
     retrieval_result, retrieval_messages = retrieval_output
     tool_result, tool_messages = tool_output
-    workspace_result, workspace_messages = workspace_output
 
     output_messages: list[BaseMessage] = [
         *retrieval_messages,
         *tool_messages,
-        *workspace_messages,
     ]
     if retrieval_result is not None:
         output_messages.extend(
@@ -837,15 +942,6 @@ async def parallel_specialists_node(
                 existing_messages=tool_messages,
             )
         )
-    if workspace_result is not None:
-        output_messages.extend(
-            _fallback_agent_result_messages(
-                turn_id=turn_id,
-                result=workspace_result,
-                existing_messages=workspace_messages,
-            )
-        )
-
     output_messages.append(
         _build_loop_status_message(
             turn_id=turn_id,
@@ -858,7 +954,6 @@ async def parallel_specialists_node(
                     for agent_name, result in [
                         ("retrieval_agent", retrieval_result),
                         ("tool_agent", tool_result),
-                        ("workspace_agent", workspace_result),
                     ]
                     if result is not None
                 ],
@@ -869,7 +964,6 @@ async def parallel_specialists_node(
         "messages": output_messages,
         "retrieve_result": retrieval_result.to_dict() if retrieval_result is not None else None,
         "tool_result": tool_result.to_dict() if tool_result is not None else None,
-        "workspace_result": workspace_result.to_dict() if workspace_result is not None else None,
     }
 
 
@@ -963,9 +1057,7 @@ def guidance_gate_pre_assess_node(
 ) -> Command[Literal["assess"]]:
     """Pause after specialists complete so the UI can inject guidance before assessment."""
 
-    resume_value = None
-    if interrupt is not None:
-        resume_value = interrupt(_build_loop_interrupt_payload(state=state, phase="guidance_gate_pre_assess"))
+    resume_value = _resume_value_from_guidance_queue(config=config)
     return Command(
         update=_materialize_intervention_update(
             state=state,
@@ -987,12 +1079,11 @@ async def assess_node(
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     messages = list(state.get("messages", []))
     question = _latest_human_text(messages)
-    short_term_message = _latest_tool_message(messages, "build_short_term_context")
-    memory_message = _latest_tool_message(messages, "search_memory")
+    short_term_message = _latest_tool_message(messages, "build_short_term_context", turn_id=turn_id)
+    memory_message = _latest_tool_message(messages, "search_memory", turn_id=turn_id)
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
     tool_result = dict(state.get("tool_result", {}) or {})
-    workspace_result = dict(state.get("workspace_result", {}) or {})
 
     iteration_count = int(state.get("iteration_count", 0) or 0)
     max_iterations = int(state.get("max_iterations", 1) or 1)
@@ -1005,7 +1096,6 @@ async def assess_node(
         specialist_payloads=[
             _stringify_for_prompt(retrieve_result) if retrieve_result else "",
             _stringify_for_prompt(tool_result) if tool_result else "",
-            _stringify_for_prompt(workspace_result) if workspace_result else "",
         ],
         must_answer=must_answer,
     )
@@ -1038,7 +1128,6 @@ async def assess_node(
             progress_summary=decision.summary,
             retrieve_result=retrieve_result,
             tool_result=tool_result,
-            workspace_result=workspace_result,
             turn_id=turn_id,
             question=question,
             short_term_message=short_term_message,
@@ -1093,7 +1182,6 @@ def _build_assistant_answer_update(
     progress_summary: dict[str, str],
     retrieve_result: dict[str, Any],
     tool_result: dict[str, Any],
-    workspace_result: dict[str, Any],
     turn_id: str,
     question: str,
     short_term_message: BaseMessage | None,
@@ -1115,7 +1203,6 @@ def _build_assistant_answer_update(
 
     retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
     tool_metadata = dict(tool_result.get("metadata", {}) or {})
-    workspace_metadata = dict(workspace_result.get("metadata", {}) or {})
     assistant_message = _build_assistant_message(
         turn_id=turn_id,
         content=answer_text,
@@ -1123,13 +1210,15 @@ def _build_assistant_answer_update(
             "artifact_type": "answer",
             "depends_on": dependencies,
             "citations": list(retrieve_metadata.get("citations", [])),
+            "asset_citations": list(retrieve_metadata.get("asset_citations", [])),
+            "asset_sources": list(retrieve_metadata.get("asset_sources", [])),
             "memory_hits": list(_message_meta(memory_message).get("memory_hits", []))
             if memory_message
             else [],
             "evidence_counts": dict(retrieve_metadata.get("evidence_counts", {})),
             "web_sources": list(tool_metadata.get("web_sources", [])),
             "tool_sources": list(tool_metadata.get("tool_sources", [])),
-            "workspace_sources": list(workspace_metadata.get("workspace_sources", [])),
+            "workspace_sources": [],
             "reusable": True,
             "orchestration": "weak_speculative_multi_agent",
             "answer_confident": answer_confident,
@@ -1140,7 +1229,7 @@ def _build_assistant_answer_update(
             "worker_progress": {
                 "retrieval": dict(retrieve_metadata.get("progress_summary", {}) or {}),
                 "tool": dict(tool_metadata.get("progress_summary", {}) or {}),
-                "workspace": dict(workspace_metadata.get("progress_summary", {}) or {}),
+                "workspace": {},
             },
         },
         raw_id=getattr(raw_answer, "id", None),
@@ -1158,12 +1247,11 @@ async def synthesize_node(
 ) -> PaperLabGraphState:
     """Synthesize specialist results into the final assistant answer."""
 
-    del config
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     messages = list(state.get("messages", []))
     question = _latest_human_text(messages)
-    short_term_message = _latest_tool_message(messages, "build_short_term_context")
-    memory_message = _latest_tool_message(messages, "search_memory")
+    short_term_message = _latest_tool_message(messages, "build_short_term_context", turn_id=turn_id)
+    memory_message = _latest_tool_message(messages, "search_memory", turn_id=turn_id)
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
 
     dependencies: list[str] = []
@@ -1177,16 +1265,13 @@ async def synthesize_node(
 
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
     tool_result = dict(state.get("tool_result", {}) or {})
-    workspace_result = dict(state.get("workspace_result", {}) or {})
-    if not retrieve_result and not tool_result and not workspace_result:
+    if not retrieve_result and not tool_result:
         for message in result_messages:
             result_payload = dict(_message_meta(message).get("result", {}) or {})
             if result_payload.get("agent_name") == "retrieval_agent" and not retrieve_result:
                 retrieve_result = result_payload
             elif result_payload.get("agent_name") == "tool_agent" and not tool_result:
                 tool_result = result_payload
-            elif result_payload.get("agent_name") == "workspace_agent" and not workspace_result:
-                workspace_result = result_payload
 
     synthesis_prompt = build_synthesis_prompt(
         question=question,
@@ -1196,7 +1281,6 @@ async def synthesize_node(
         specialist_payloads=[
             _stringify_for_prompt(retrieve_result) if retrieve_result else "",
             _stringify_for_prompt(tool_result) if tool_result else "",
-            _stringify_for_prompt(workspace_result) if workspace_result else "",
         ],
     )
     memory_decision_prompt = (
@@ -1208,6 +1292,58 @@ async def synthesize_node(
         + "- Do not write ordinary answers, temporary tasks, uncertain claims, private/sensitive data, or duplicate memory.\n"
         + "- If unsure, call `decide_memory_write` with `should_write=false`."
     )
+    tool_observations: list[dict[str, object]] = []
+    tool_trace_messages: list[BaseMessage] = []
+    if bool(dict(config or {}).get("configurable", {}).get("tools_enabled", False)):
+        tool_prompt = (
+            memory_decision_prompt
+            + "\n\nWorkspace tools are enabled. You may call file tools if local files or command output are needed. "
+            + "Use read-only tools freely. write_file, mkdir, and run_command require user approval."
+        )
+        tool_model = _runtime().chat_model.bind_tools([*_memory_write_schema(), *_main_workspace_tool_schema()])
+        tool_answer = await tool_model.ainvoke(tool_prompt)
+        workspace_tool_calls = [
+            call
+            for call in _extract_tool_calls(tool_answer)
+            if str(call.get("name") or "") in {
+                "detect_platform",
+                "list_files",
+                "find_files",
+                "search_text",
+                "read_file",
+                "mkdir",
+                "write_file",
+                "run_command",
+            }
+        ]
+        for call in workspace_tool_calls[:4]:
+            observation = _execute_main_workspace_tool(call)
+            tool_observations.append(observation)
+            trace_text = str(observation.get("summary") or "")
+            trace_content = str(observation.get("content") or "")
+            if trace_content:
+                trace_text = f"{trace_text}\n\n{trace_content}" if trace_text else trace_content
+            tool_trace_messages.append(
+                _build_tool_message(
+                    turn_id=turn_id,
+                    name="workspace_tool",
+                    content=trace_text,
+                    metadata={
+                        "artifact_type": "workspace_tool_result",
+                        "tool_name": str(observation.get("tool_name") or ""),
+                        "args": dict(observation.get("args", {}) or {}),
+                        "status": str(observation.get("status") or ""),
+                        "reusable": False,
+                    },
+                    tool_call_id=str(call.get("id") or ""),
+                )
+            )
+        if tool_observations:
+            memory_decision_prompt += (
+                "\n\nWorkspace tool observations:\n"
+                + _stringify_for_prompt(tool_observations)
+            )
+
     bound_model = _runtime().chat_model.bind_tools(_memory_write_schema())
     raw_answer = await bound_model.ainvoke(memory_decision_prompt)
     memory_write_decision = _parse_memory_write_decision(raw_answer)
@@ -1217,7 +1353,20 @@ async def synthesize_node(
 
     retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
     tool_metadata = dict(tool_result.get("metadata", {}) or {})
-    workspace_metadata = dict(workspace_result.get("metadata", {}) or {})
+    workspace_sources: list[dict[str, object]] = []
+    changed_files: list[str] = []
+    for observation in tool_observations:
+        for path in list(observation.get("changed_files", []) or []):
+            changed_files.append(str(path))
+    if tool_observations:
+        workspace_sources.extend(
+            {
+                "kind": "tool_call",
+                "path": str(observation.get("tool_name") or ""),
+                "summary": str(observation.get("summary") or ""),
+            }
+            for observation in tool_observations
+        )
     assistant_message = _build_assistant_message(
         turn_id=turn_id,
         content=answer_text,
@@ -1225,13 +1374,17 @@ async def synthesize_node(
             "artifact_type": "answer",
             "depends_on": dependencies,
             "citations": list(retrieve_metadata.get("citations", [])),
+            "asset_citations": list(retrieve_metadata.get("asset_citations", [])),
+            "asset_sources": list(retrieve_metadata.get("asset_sources", [])),
             "memory_hits": list(_message_meta(memory_message).get("memory_hits", []))
             if memory_message
             else [],
             "evidence_counts": dict(retrieve_metadata.get("evidence_counts", {})),
             "web_sources": list(tool_metadata.get("web_sources", [])),
             "tool_sources": list(tool_metadata.get("tool_sources", [])),
-            "workspace_sources": list(workspace_metadata.get("workspace_sources", [])),
+            "workspace_sources": workspace_sources,
+            "workspace_tool_calls": tool_observations,
+            "changed_files": changed_files,
             "reusable": True,
             "orchestration": "weak_speculative_multi_agent",
             "answer_confident": bool(state.get("answer_confident", False)),
@@ -1242,13 +1395,13 @@ async def synthesize_node(
             "worker_progress": {
                 "retrieval": dict(retrieve_metadata.get("progress_summary", {}) or {}),
                 "tool": dict(tool_metadata.get("progress_summary", {}) or {}),
-                "workspace": dict(workspace_metadata.get("progress_summary", {}) or {}),
+                "workspace": {},
             },
         },
         raw_id=getattr(raw_answer, "id", None),
     )
     return {
-        "messages": [assistant_message],
+        "messages": [*tool_trace_messages, assistant_message],
         "answer_confident": bool(state.get("answer_confident", False)),
         "stop_reason": str(state.get("stop_reason") or ""),
     }
@@ -1261,12 +1414,14 @@ async def recall_memory_node(
     """Recall project-scoped memory and append it as a tool artifact message."""
 
     request_config = resolve_agent_request_config(dict(config or {}))
+    if not bool(state.get("run_memory", False)):
+        return {}
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     memory_service = build_memory_service(
         backend=_memory_backend(),
         settings=AgentSettings.from_env(),
     )
-    question = _latest_human_text(state.get("messages", []))
+    question = str(state.get("memory_query") or _latest_human_text(state.get("messages", [])))
     recall_result = await asyncio.to_thread(
         memory_service.recall,
         role="supervisor",
@@ -1352,12 +1507,13 @@ def build_graph():
         max_iterations: int
         answer_confident: bool
         stop_reason: str
+        run_memory: bool
+        memory_query: str
+        memory_reason: str
         retrieve_task: AgentTask | None
         tool_task: AgentTask | None
-        workspace_task: AgentTask | None
         retrieve_result: dict[str, Any] | None
         tool_result: dict[str, Any] | None
-        workspace_result: dict[str, Any] | None
         processed_human_message_count: int
         intervention_count: int
 
@@ -1378,10 +1534,10 @@ def build_graph():
     builder.add_edge(START, "prepare_turn")
     builder.add_edge("prepare_turn", "thread_lock")
     builder.add_edge("thread_lock", "build_short_term_context")
-    builder.add_edge("build_short_term_context", "recall_memory")
-    builder.add_edge("recall_memory", "guidance_gate_pre_route")
+    builder.add_edge("build_short_term_context", "guidance_gate_pre_route")
     builder.add_edge("guidance_gate_pre_route", "main_route")
-    builder.add_edge("main_route", "guidance_gate_post_route")
+    builder.add_edge("main_route", "recall_memory")
+    builder.add_edge("recall_memory", "guidance_gate_post_route")
     builder.add_edge("guidance_gate_post_route", "parallel_specialists")
     builder.add_edge("parallel_specialists", "guidance_gate_pre_assess")
     builder.add_edge("guidance_gate_pre_assess", "assess")
@@ -1402,5 +1558,4 @@ retrieve_agent_graph = build_retrieve_agent_graph(
     resolve_request_config=resolve_agent_request_config
 )
 tool_agent_graph = build_tool_agent_graph()
-workspace_agent_graph = build_workspace_agent_graph()
 graph = build_graph()

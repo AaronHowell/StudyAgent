@@ -1,12 +1,24 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { MessageSquare, AlertCircle } from "lucide-react";
 import type { ChatSessionSummary } from "../../types";
-import { usePaperLabStream } from "../../usePaperLabStream";
+import { type InterruptPayload, usePaperLabStream } from "../../usePaperLabStream";
 import { ChatMessage } from "./ChatMessage";
 import { ChatComposer } from "./ChatComposer";
 import { ThreadSidebar } from "./ThreadSidebar";
 
-type LoopInterruptValue = { phase?: string; question?: string };
+type LoopInterruptValue = {
+  type?: string;
+  phase?: string;
+  question?: string;
+  approval?: {
+    tool_call_id: string;
+    tool_name: string;
+    args: Record<string, unknown>;
+    risk: string;
+    platform: Record<string, unknown>;
+    preview: string;
+  };
+};
 
 type ChatThreadSummary = {
   id: string;
@@ -39,6 +51,7 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [interventionDraft, setInterventionDraft] = useState("");
   const [showSummaries, setShowSummaries] = useState(false);
+  const [toolsEnabled, setToolsEnabled] = useState(false);
   const [serverThreads, setServerThreads] = useState<ChatThreadSummary[]>([]);
   const submitLockRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -61,12 +74,16 @@ export function ChatPanel({
     return Object.values(groupedThreads).flat();
   }, [groupedThreads]);
 
-  // Auto-scroll on new messages
+  // Auto-scroll on new messages or session restore
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+      });
     }
-  }, [stream.turns]);
+  }, [stream.turns, stream.threadId]);
 
   // Load sessions on mount
   useEffect(() => {
@@ -103,6 +120,7 @@ export function ChatPanel({
         { messages: [{ type: "human", content: text }] },
         {
           projectId,
+          toolsEnabled,
           optimisticTurns: [{ id: `local-${Date.now()}`, role: "user", content: text, created_at: new Date().toISOString() }],
         },
       );
@@ -164,6 +182,17 @@ export function ChatPanel({
     setServerThreads(sessions.map(toThreadSummary));
   }
 
+  async function handleDeleteThread(thread: ChatThreadSummary) {
+    if (!window.confirm(`确定删除对话「${thread.title}」？`)) return;
+    try {
+      await stream.deleteSession({ projectId: thread.projectId, sessionId: thread.id });
+      setServerThreads((current) => current.filter((t) => t.id !== thread.id));
+      if (stream.threadId === thread.id) {
+        stream.resetThread();
+      }
+    } catch { /* error in stream state */ }
+  }
+
   return (
     <section className={`chat-board ${showThreadSidebar ? "with-sidebar" : ""}`}>
       {showThreadSidebar ? (
@@ -172,6 +201,7 @@ export function ChatPanel({
           activeThreadId={stream.threadId}
           onSelect={openThread}
           onNew={() => stream.resetThread()}
+          onDelete={handleDeleteThread}
         />
       ) : null}
 
@@ -221,7 +251,17 @@ export function ChatPanel({
           )}
         </div>
 
-        {stream.interrupt ? (
+        {stream.interrupt?.value.type === "tool_approval" ? (
+          <ToolApprovalPanel
+            interrupt={stream.interrupt}
+            onApprove={() =>
+              void stream.submit(null, { projectId, toolsEnabled, command: { resume: { action: "approve" } } })
+            }
+            onReject={() =>
+              void stream.submit(null, { projectId, toolsEnabled, command: { resume: { action: "reject" } } })
+            }
+          />
+        ) : stream.interrupt ? (
           <div className="interrupt-panel">
             <strong>当前流程已暂停</strong>
             {stream.interrupt.value.question ? <p>{stream.interrupt.value.question}</p> : null}
@@ -248,6 +288,8 @@ export function ChatPanel({
           onChange={setDraft}
           onSend={() => void handleSend()}
           onStop={() => stream.stop()}
+          toolsEnabled={toolsEnabled}
+          onToolsEnabledChange={setToolsEnabled}
           isLoading={stream.isLoading}
           placeholder={placeholder}
         />
@@ -263,4 +305,33 @@ function toThreadSummary(session: ChatSessionSummary): ChatThreadSummary {
     projectId: session.project_id,
     updatedAt: session.updated_at,
   };
+}
+
+function ToolApprovalPanel({
+  interrupt,
+  onApprove,
+  onReject,
+}: {
+  interrupt: InterruptPayload<LoopInterruptValue>;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const approval = interrupt.value.approval;
+  if (!approval) return null;
+
+  return (
+    <div className="interrupt-panel">
+      <strong>工具调用审批</strong>
+      <p>{approval.preview || interrupt.value.question}</p>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12, color: "var(--text-secondary)" }}>
+        <span>工具：{approval.tool_name}</span>
+        <span>风险：{approval.risk}</span>
+      </div>
+      <pre className="chat-tool-approval-args">{JSON.stringify(approval.args, null, 2)}</pre>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn btn-primary btn-sm" onClick={onApprove}>批准</button>
+        <button className="btn btn-sm" onClick={onReject}>拒绝</button>
+      </div>
+    </div>
+  );
 }

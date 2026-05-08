@@ -8,7 +8,9 @@ class SupervisorGraphOrderTest(unittest.TestCase):
 
         self.assertIn('builder.add_edge("prepare_turn", "thread_lock")', supervisor_source)
         self.assertIn('builder.add_edge("thread_lock", "build_short_term_context")', supervisor_source)
-        self.assertIn('builder.add_edge("build_short_term_context", "recall_memory")', supervisor_source)
+        self.assertIn('builder.add_edge("build_short_term_context", "guidance_gate_pre_route")', supervisor_source)
+        self.assertIn('builder.add_edge("main_route", "recall_memory")', supervisor_source)
+        self.assertIn('builder.add_edge("recall_memory", "guidance_gate_post_route")', supervisor_source)
         self.assertNotIn('builder.add_edge("recall_memory", "thread_lock")', supervisor_source)
 
     def test_assessment_does_not_use_static_confidence_rules(self) -> None:

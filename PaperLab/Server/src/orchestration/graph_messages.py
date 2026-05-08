@@ -81,10 +81,18 @@ def latest_messages_by_artifact(
     ]
 
 
-def latest_tool_message(messages: list[BaseMessage], name: str) -> BaseMessage | None:
+def latest_tool_message(
+    messages: list[BaseMessage],
+    name: str,
+    *,
+    turn_id: str | None = None,
+) -> BaseMessage | None:
     for message in reversed(messages):
-        if getattr(message, "type", "") == "tool" and message_name(message) == name:
-            return message
+        if getattr(message, "type", "") != "tool" or message_name(message) != name:
+            continue
+        if turn_id is not None and str(message_meta(message).get("turn_id") or "") != turn_id:
+            continue
+        return message
     return None
 
 
@@ -136,30 +144,30 @@ def dispatch_schema() -> list[dict[str, object]]:
             "type": "function",
             "function": {
                 "name": "dispatch_specialists",
-                "description": "Choose whether to launch retrieval, tool, and/or workspace specialist tasks.",
+                "description": "Choose whether to launch memory recall, retrieval, and/or external tool specialist tasks.",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "run_memory": {"type": "boolean"},
+                        "memory_query": {"type": "string"},
+                        "memory_reason": {"type": "string"},
                         "run_retrieval": {"type": "boolean"},
                         "retrieval_query": {"type": "string"},
                         "retrieval_reason": {"type": "string"},
                         "run_tool": {"type": "boolean"},
                         "tool_query": {"type": "string"},
                         "tool_reason": {"type": "string"},
-                        "run_workspace": {"type": "boolean"},
-                        "workspace_query": {"type": "string"},
-                        "workspace_reason": {"type": "string"},
                     },
                     "required": [
+                        "run_memory",
+                        "memory_query",
+                        "memory_reason",
                         "run_retrieval",
                         "retrieval_query",
                         "retrieval_reason",
                         "run_tool",
                         "tool_query",
                         "tool_reason",
-                        "run_workspace",
-                        "workspace_query",
-                        "workspace_reason",
                     ],
                 },
             },
@@ -299,8 +307,13 @@ def _latest_messages_by_artifact(
     return latest_messages_by_artifact(messages, artifact_type, turn_id=turn_id)
 
 
-def _latest_tool_message(messages: list[BaseMessage], name: str) -> BaseMessage | None:
-    return latest_tool_message(messages, name)
+def _latest_tool_message(
+    messages: list[BaseMessage],
+    name: str,
+    *,
+    turn_id: str | None = None,
+) -> BaseMessage | None:
+    return latest_tool_message(messages, name, turn_id=turn_id)
 
 
 def _stringify_for_prompt(value: Any) -> str:

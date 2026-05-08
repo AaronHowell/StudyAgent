@@ -110,7 +110,7 @@ class PdfParser:
         self.config = config or PdfParseConfig()
         self.title_extractor = title_extractor
 
-    def parse_pdf_metadata(self, path: Path) -> dict[str, object]:
+    def parse_pdf_metadata(self, path: Path, *, use_llm: bool = True) -> dict[str, object]:
         """Extract lightweight PDF metadata for later document enrichment.
 
         作用:
@@ -118,6 +118,7 @@ class PdfParser:
 
         Args:
             path: PDF 文件路径。
+            use_llm: 是否允许在本地 PDF 元数据不足时调用 LLM 做增强提取。
 
         Returns:
             dict[str, object]: 包含来源路径、标题、作者、页数等字段的字典。
@@ -128,7 +129,7 @@ class PdfParser:
         llm_metadata: dict[str, object] = {}
         extracted_title = self._extract_title_from_metadata(metadata)
 
-        if not extracted_title:
+        if use_llm and not extracted_title:
             llm_metadata = self._extract_metadata_with_llm(reader)
             extracted_title = self._normalize_metadata_value(llm_metadata.get("title"))
             if extracted_title and self._looks_like_bad_title(extracted_title):

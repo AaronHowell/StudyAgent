@@ -89,28 +89,23 @@ class WorkspaceImplementationStateTest(unittest.TestCase):
         self.assertEqual(result.metadata["implementation_report"]["changed_files"], ["src/example.py"])
         self.assertEqual(result.metadata["workspace_sources"][0]["path"], "src/example.py")
 
-    def test_workspace_graph_declares_specialist_loop_nodes(self) -> None:
+    def test_workspace_agent_graph_source_is_not_on_main_path(self) -> None:
         from pathlib import Path
 
-        source = Path(WORKSPACE_AGENT_SOURCE).read_text(encoding="utf-8")
+        supervisor_source = Path("src/orchestration/supervisor.py").read_text(encoding="utf-8")
 
-        for node in ["plan", "act", "observe", "assess", "report"]:
-            self.assertIn(f'builder.add_node("{node}"', source)
-        self.assertIn('builder.add_edge(START, "plan")', source)
-        self.assertIn('builder.add_edge("plan", "act")', source)
-        self.assertIn('builder.add_edge("act", "observe")', source)
-        self.assertIn('builder.add_edge("observe", "assess")', source)
-        self.assertIn('builder.add_node("report"', source)
+        self.assertFalse(Path(WORKSPACE_AGENT_SOURCE).exists())
+        self.assertNotIn("build_workspace_agent_graph", supervisor_source)
+        self.assertNotIn("workspace_agent_graph", supervisor_source)
 
-    def test_supervisor_dispatches_structured_implementation_task(self) -> None:
+    def test_supervisor_does_not_dispatch_workspace_specialist_task(self) -> None:
         from pathlib import Path
 
         source = Path("src/orchestration/supervisor.py").read_text(encoding="utf-8")
 
-        self.assertIn('task_type="implementation"', source)
-        self.assertIn('"objective": workspace_query', source)
-        self.assertIn('"acceptance_criteria"', source)
-        self.assertNotIn('task_type="workspace_ops"', source)
+        self.assertNotIn('agent_name="workspace_agent"', source)
+        self.assertNotIn('task_type="implementation"', source)
+        self.assertNotIn("workspace_query", source)
 
     def test_workspace_prompt_describes_implementation_specialist_actions(self) -> None:
         from prompts.builders import build_workspace_agent_selection_messages

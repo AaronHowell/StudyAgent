@@ -1,17 +1,27 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { FolderOpen, RefreshCw, Layers, ChevronLeft, ChevronRight } from "lucide-react";
 import type { ScannedDocument } from "../../types";
 import type { IngestionTaskSummary } from "../../hooks/useDocuments";
 import { PaperCard } from "./PaperCard";
 import { EmptyState } from "../common/EmptyState";
 
-const ITEMS_PER_PAGE = 12;
+const CARD_MIN_WIDTH = 280;
+const CARD_MIN_HEIGHT = 140;
+const GAP = 12;
+
+function calcItemsPerPage(containerWidth: number, containerHeight: number): number {
+  if (containerWidth <= 0 || containerHeight <= 0) return 12;
+  const cols = Math.max(1, Math.floor((containerWidth + GAP) / (CARD_MIN_WIDTH + GAP)));
+  const rows = Math.max(1, Math.floor((containerHeight + GAP) / (CARD_MIN_HEIGHT + GAP)));
+  return Math.max(cols, cols * rows);
+}
 
 export function PaperLibrary({
   documents,
   taskByPath,
   ingestingId,
   batchIngesting,
+  metadataRefreshingPath,
   loading,
   pendingCount,
   selectedId,
@@ -20,6 +30,7 @@ export function PaperLibrary({
   onSelect,
   onOpen,
   onIngest,
+  onRefreshMetadata,
   onBatchIngest,
   onScan,
   onChooseFolder,
@@ -30,6 +41,7 @@ export function PaperLibrary({
   taskByPath: Record<string, IngestionTaskSummary>;
   ingestingId: string | null;
   batchIngesting: boolean;
+  metadataRefreshingPath: string | null;
   loading: boolean;
   pendingCount: number;
   selectedId: string | null;
@@ -38,6 +50,7 @@ export function PaperLibrary({
   onSelect: (doc: ScannedDocument) => void;
   onOpen: (doc: ScannedDocument) => void;
   onIngest: (doc: ScannedDocument) => void;
+  onRefreshMetadata: (doc: ScannedDocument) => void;
   onBatchIngest: () => void;
   onScan: () => void;
   onChooseFolder: () => void;
@@ -46,6 +59,28 @@ export function PaperLibrary({
 }) {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [itemsPerPage, setItemsPerPage] = useState(12);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const gridAreaRef = useRef<HTMLDivElement>(null);
+
+  const recalc = useCallback(() => {
+    const el = gridAreaRef.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const next = calcItemsPerPage(width, height);
+    setItemsPerPage((prev) => (prev !== next ? next : prev));
+  }, []);
+
+  useEffect(() => {
+    recalc();
+    const el = gridAreaRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(recalc);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [recalc]);
+
+  useEffect(() => { setPage(1); }, [itemsPerPage]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return documents;
@@ -55,9 +90,9 @@ export function PaperLibrary({
     );
   }, [documents, search]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / itemsPerPage));
   const safePage = Math.min(page, totalPages);
-  const paginated = filtered.slice((safePage - 1) * ITEMS_PER_PAGE, safePage * ITEMS_PER_PAGE);
+  const paginated = filtered.slice((safePage - 1) * itemsPerPage, safePage * itemsPerPage);
 
   return (
     <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -105,7 +140,7 @@ export function PaperLibrary({
       </div>
 
       {/* Main content */}
-      <div className="main-content" style={{ padding: 16 }}>
+      <div className="main-content" style={{ padding: 16, display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
         {/* Search bar */}
         <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
           <input
@@ -129,29 +164,37 @@ export function PaperLibrary({
         ) : (
           <>
             <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-                gap: 12,
-              }}
+              ref={gridAreaRef}
+              style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
             >
-              {paginated.map((doc) => {
-                const task = taskByPath[doc.path];
-                const state = task ? task.state : doc.ingested ? "indexed" : "pending";
-                return (
-                  <PaperCard
-                    key={doc.id}
-                    document={doc}
-                    state={state}
-                    selected={doc.id === selectedId}
-                    ingesting={ingestingId === doc.id}
-                    onSelect={() => onSelect(doc)}
-                    onOpen={() => onOpen(doc)}
-                    onIngest={() => onIngest(doc)}
-                    onContextMenu={(e) => onContextMenu(e, doc)}
-                  />
-                );
-              })}
+              <div
+                ref={gridRef}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_MIN_WIDTH}px, 1fr))`,
+                  gap: GAP,
+                }}
+              >
+                {paginated.map((doc) => {
+                  const task = taskByPath[doc.path];
+                  const state = task ? task.state : doc.ingested ? "indexed" : "pending";
+                  return (
+                    <PaperCard
+                      key={doc.id}
+                      document={doc}
+                      state={state}
+                      selected={doc.id === selectedId}
+                      ingesting={ingestingId === doc.id}
+                      metadataRefreshing={metadataRefreshingPath === doc.path}
+                      onSelect={() => onSelect(doc)}
+                      onOpen={() => onOpen(doc)}
+                      onIngest={() => onIngest(doc)}
+                      onRefreshMetadata={() => onRefreshMetadata(doc)}
+                      onContextMenu={(e) => onContextMenu(e, doc)}
+                    />
+                  );
+                })}
+              </div>
             </div>
 
             {/* Pagination */}

@@ -112,6 +112,14 @@ describe("PaperLabChatPanel", () => {
             ),
           );
         }
+        if (url.includes("/chat/guidance")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ queued: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
 
         return Promise.resolve(
           createSseResponse([
@@ -253,8 +261,16 @@ describe("PaperLabChatPanel", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "新对话" }));
+    await user.click(screen.getByLabelText("工具"));
     await user.type(screen.getByPlaceholderText("请输入问题"), "解释这篇论文的核心贡献");
     await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const streamCall = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.find(([input]) => String(input).includes("/chat/stream"));
+    expect(JSON.parse(String((streamCall?.[1] as RequestInit | undefined)?.body))).toMatchObject({
+      tools_enabled: true,
+    });
 
     expect(screen.getByText("解释这篇论文的核心贡献")).toBeInTheDocument();
     await waitFor(() =>
@@ -269,5 +285,62 @@ describe("PaperLabChatPanel", () => {
     expect(screen.getByText("先检索，再总结核心贡献。")).toBeInTheDocument();
     expect(screen.getByText("检索论文核心段落")).toBeInTheDocument();
     expect(screen.getByText("Attention Is All You Need p.3")).toBeInTheDocument();
+  });
+
+  test("流式回答中输入会进入引导队列而不是启动新对话", async () => {
+    const user = userEvent.setup();
+    const streamControllers: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+    const encoder = new TextEncoder();
+    vi.mocked(globalThis.fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/sessions?")) {
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      }
+      if (url.includes("/chat/guidance")) {
+        return Promise.resolve(new Response(JSON.stringify({ queued: true }), { status: 200 }));
+      }
+      if (url.includes("/chat/stream")) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller);
+            controller.enqueue(
+              encoder.encode(
+                `event: assistant_turn_started\ndata: ${JSON.stringify({ turn_id: "turn-2" })}\n\n`,
+              ),
+            );
+          },
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+
+    render(
+      <PaperLabChatPanel
+        projectId="vision-lab"
+        title="论文助手"
+        description="测试用聊天面板"
+        placeholder="请输入问题"
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("请输入问题"), "解释论文");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await user.type(screen.getByPlaceholderText("请输入问题"), "请优先看实验");
+    expect(screen.getByRole("button", { name: "发送" })).not.toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() =>
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/chat/guidance"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining("请优先看实验"),
+        }),
+      ),
+    );
+    expect(screen.getByText("请优先看实验")).toBeInTheDocument();
+    streamControllers[0]?.close();
   });
 });

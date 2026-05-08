@@ -84,6 +84,14 @@ class AssessmentDecisionTest(unittest.TestCase):
         self.assertIn("Assessment guidance from previous evidence review:", user_prompt)
         self.assertIn("- Retrieve more detail about the experimental setup.", user_prompt)
 
+    def test_main_route_prompt_mentions_optional_memory_and_retrieval_dispatch(self) -> None:
+        _, user_prompt = build_main_route_messages(
+            question="Just say hello.",
+        )
+
+        self.assertIn("dispatch memory recall", user_prompt)
+        self.assertIn("Dispatch retrieval", user_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

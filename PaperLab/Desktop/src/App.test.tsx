@@ -55,6 +55,8 @@ const mockDocument = {
   ingested: true,
   modified_at: "2026-04-21T10:00:00.000Z",
   content_hash: "hash-1",
+  metadata_source: "pdf",
+  metadata_cached: false,
 };
 
 let scannedDocuments = [mockDocument];
@@ -70,6 +72,8 @@ function buildMockDocument(index: number) {
     ingested: index % 2 === 0,
     modified_at: `2026-04-${String((index % 28) + 1).padStart(2, "0")}T10:00:00.000Z`,
     content_hash: `hash-${index}`,
+    metadata_source: "pdf",
+    metadata_cached: false,
   };
 }
 
@@ -105,6 +109,23 @@ describe("App", () => {
               status: 200,
               headers: { "Content-Type": "application/json" },
             }),
+          );
+        }
+
+        if (url.includes("/documents/metadata/refresh")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                document: {
+                  ...mockDocument,
+                  title: "Attention Is All You Need (LLM)",
+                },
+              }),
+              {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              },
+            ),
           );
         }
 
@@ -205,5 +226,51 @@ describe("App", () => {
     await waitFor(() =>
       expect(screen.getByText("论文 13")).toBeInTheDocument(),
     );
+  });
+
+  test("可以按需用 LLM 刷新单篇论文元数据", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      "paperlab.desktop.preferences",
+      JSON.stringify({
+        rootPath: "D:/Research/Papers",
+        projectId: "vision-lab",
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Attention Is All You Need")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTitle("用 LLM 解析元数据"));
+
+    await waitFor(() =>
+      expect(screen.getByText("Attention Is All You Need (LLM)")).toBeInTheDocument(),
+    );
+  });
+
+  test("论文卡片标记已经缓存的 LLM 元数据", async () => {
+    scannedDocuments = [
+      {
+        ...mockDocument,
+        metadata_source: "llm",
+        metadata_cached: true,
+      },
+    ];
+    localStorage.setItem(
+      "paperlab.desktop.preferences",
+      JSON.stringify({
+        rootPath: "D:/Research/Papers",
+        projectId: "vision-lab",
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Attention Is All You Need")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("LLM")).toBeInTheDocument();
   });
 });

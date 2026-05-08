@@ -226,6 +226,7 @@ function App() {
               taskByPath={docs.taskByPath}
               ingestingId={docs.ingestingId}
               batchIngesting={docs.batchIngesting}
+              metadataRefreshingPath={docs.metadataRefreshingPath}
               loading={docs.loading}
               pendingCount={docs.pendingCount}
               selectedId={selectedDocument?.id ?? null}
@@ -234,6 +235,7 @@ function App() {
               onSelect={setSelectedDocument}
               onOpen={openReader}
               onIngest={(doc) => void docs.ingest(doc, projectId)}
+              onRefreshMetadata={(doc) => void docs.refreshMetadata(doc, projectId)}
               onBatchIngest={() => void docs.batchIngest(projectId)}
               onScan={() => void docs.scan(rootPath, projectId)}
               onChooseFolder={() => void chooseProjectFolder()}

@@ -16,6 +16,8 @@ export interface ScannedDocument {
   ingested: boolean;
   modified_at: string;
   content_hash: string;
+  metadata_source?: string;
+  metadata_cached?: boolean;
 }
 
 export interface DocumentImage {

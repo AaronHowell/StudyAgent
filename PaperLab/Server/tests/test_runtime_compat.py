@@ -3,14 +3,18 @@ from __future__ import annotations
 import os
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 from api import config as api_config
 import configs
 from configs import Settings
 from domain import MemoryType
 from integrations.storage.mem0_memory_store import Mem0MemoryStore
+from integrations.vectorstore.qdrant_store import QdrantChunkVectorStore, QdrantConnectionConfig
+from langchain_core.messages import AIMessage, HumanMessage
 from memory.service import MemoryService
 from orchestration.request_config import resolve_agent_request_config
+from runtime.dependencies import _build_memory_chat_model, _build_qdrant_client
 from runtime import settings as runtime_settings
 from runtime.settings import AgentSettings
 
@@ -161,6 +165,36 @@ class RuntimeCompatTest(unittest.TestCase):
         self.assertEqual(recall.hits, [])
         self.assertFalse(stored)
 
+    def test_short_term_context_keeps_answer_messages_but_excludes_internal_artifacts(self) -> None:
+        service = MemoryService(
+            backend=None,
+            settings=AgentSettings(short_term_raw_turns=4, short_term_summary_turns=0),
+        )
+        messages = [
+            HumanMessage(content="你好"),
+            HumanMessage(
+                content="你好",
+                additional_kwargs={"metadata": {"artifact_type": "question"}},
+            ),
+            AIMessage(
+                content="Recent raw turns:\n- user: 你好",
+                additional_kwargs={"metadata": {"artifact_type": "short_term_context"}},
+            ),
+            AIMessage(
+                content="最终回答",
+                additional_kwargs={"metadata": {"artifact_type": "answer"}},
+            ),
+            HumanMessage(content="继续"),
+        ]
+
+        context = service.build_short_term_context(role="supervisor", messages=messages)
+
+        self.assertIn("- user: 你好", context)
+        self.assertIn("- user: 继续", context)
+        self.assertIn("- assistant: 最终回答", context)
+        self.assertNotIn("artifact_type", context)
+        self.assertNotIn("- assistant: Recent raw turns:", context)
+
     def test_mem0_adapter_supports_legacy_top_level_user_id_scope(self) -> None:
         client = _LegacyScopedMem0Client()
         store = Mem0MemoryStore(client=client)
@@ -251,11 +285,85 @@ class RuntimeCompatTest(unittest.TestCase):
         self.assertEqual(settings.memory_backend, "markdown")
         self.assertEqual(settings.memory_markdown_root, "custom/memory")
 
+    def test_memory_llm_defaults_to_main_chat_model(self) -> None:
+        settings = AgentSettings(
+            llm_base_url="http://main.local/v1",
+            llm_api_key="main-key",
+            llm_model="main-model",
+        )
+
+        self.assertEqual(settings.memory_llm_base_url, "http://main.local/v1")
+        self.assertEqual(settings.memory_llm_api_key, "main-key")
+        self.assertEqual(settings.memory_llm_model, "main-model")
+
+    def test_memory_llm_can_be_configured_independently(self) -> None:
+        env = {
+            "PAPERLAB_LLM_BASE_URL": "https://big.example/v1",
+            "PAPERLAB_LLM_API_KEY": "big-key",
+            "PAPERLAB_LLM_MODEL": "big-model",
+            "PAPERLAB_MEMORY_LLM_BASE_URL": "http://small.local/v1",
+            "PAPERLAB_MEMORY_LLM_API_KEY": "small-key",
+            "PAPERLAB_MEMORY_LLM_MODEL": "small-model",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            settings = AgentSettings.from_env()
+
+        self.assertEqual(settings.llm_base_url, "https://big.example/v1")
+        self.assertEqual(settings.llm_api_key, "big-key")
+        self.assertEqual(settings.llm_model, "big-model")
+        self.assertEqual(settings.memory_llm_base_url, "http://small.local/v1")
+        self.assertEqual(settings.memory_llm_api_key, "small-key")
+        self.assertEqual(settings.memory_llm_model, "small-model")
+
+    def test_memory_chat_model_uses_independent_config(self) -> None:
+        settings = AgentSettings(
+            llm_base_url="https://big.example/v1",
+            llm_api_key="big-key",
+            llm_model="big-model",
+            memory_llm_base_url="http://small.local/v1",
+            memory_llm_api_key="small-key",
+            memory_llm_model="small-model",
+        )
+
+        with patch("runtime.dependencies.ChatOpenAI") as chat_openai:
+            _build_memory_chat_model(settings)
+
+        self.assertEqual(chat_openai.call_args.kwargs["base_url"], "http://small.local/v1")
+        self.assertEqual(chat_openai.call_args.kwargs["api_key"], "small-key")
+        self.assertEqual(chat_openai.call_args.kwargs["model"], "small-model")
+
+    def test_qdrant_client_ignores_system_proxy_by_default(self) -> None:
+        settings = AgentSettings()
+
+        self.assertEqual(settings.qdrant_trust_env, False)
+
+    def test_qdrant_client_can_trust_environment_proxy_when_enabled(self) -> None:
+        with patch.dict(os.environ, {"PAPERLAB_QDRANT_TRUST_ENV": "true"}, clear=False):
+            settings = AgentSettings.from_env()
+
+        self.assertEqual(settings.qdrant_trust_env, True)
+
     def test_invalid_memory_backend_falls_back_to_mem0(self) -> None:
         with patch.dict(os.environ, {"PAPERLAB_MEMORY_BACKEND": "bad-backend"}, clear=False):
             settings = AgentSettings.from_env()
 
         self.assertEqual(settings.memory_backend, "mem0")
+
+    def test_vector_store_disables_environment_proxy_by_default(self) -> None:
+        config = QdrantConnectionConfig(host="10.201.0.86", port=6333)
+
+        with patch("integrations.vectorstore.qdrant_store.QdrantClient") as qdrant_client:
+            QdrantChunkVectorStore(config)
+
+        self.assertEqual(qdrant_client.call_args.kwargs["trust_env"], False)
+
+    def test_memory_qdrant_client_uses_same_proxy_policy(self) -> None:
+        settings = AgentSettings(qdrant_url="http://10.201.0.86:6333", qdrant_trust_env=False)
+
+        with patch("runtime.dependencies.QdrantClient") as qdrant_client:
+            _build_qdrant_client(settings, urlparse(settings.qdrant_url))
+
+        self.assertEqual(qdrant_client.call_args.kwargs["trust_env"], False)
 
     def test_api_and_agent_settings_share_base_environment_parsing(self) -> None:
         env = {

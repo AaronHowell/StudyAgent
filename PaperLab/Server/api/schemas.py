@@ -45,6 +45,8 @@ class DocumentListItem(BaseModel):
     ingested: bool = False
     modified_at: str
     content_hash: str
+    metadata_source: str = "pdf"
+    metadata_cached: bool = False
 
 
 class ScanDocumentsResponse(BaseModel):
@@ -102,6 +104,19 @@ class DocumentIngestionStatusResponse(BaseModel):
     document_id: str
     path: str
     ingested: bool
+
+
+class RefreshDocumentMetadataRequest(BaseModel):
+    """Request payload for reparsing one PDF document's metadata."""
+
+    path: str = Field(..., description="Absolute path to one PDF document")
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, description="Target project identifier")
+
+
+class RefreshDocumentMetadataResponse(BaseModel):
+    """Response payload for reparsed document metadata."""
+
+    document: DocumentListItem
 
 
 class IngestDocumentRequest(BaseModel):
@@ -296,6 +311,15 @@ class ChatRunRequest(BaseModel):
         description="Initial graph input, typically {messages: [...]}",
     )
     command: ChatCommandInput | None = None
+    tools_enabled: bool = False
+
+
+class ChatGuidanceRequest(BaseModel):
+    """Non-blocking guidance queued for the next graph guidance gate."""
+
+    project_id: str = Field(..., description="Target project identifier")
+    thread_id: str = Field(..., description="Persistent graph thread identifier")
+    content: str = Field(..., description="Guidance text to inject at the next gate")
 
 
 class ChatInterruptPayload(BaseModel):

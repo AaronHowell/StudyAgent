@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 
 from documents.pdf_parser import PdfParser
@@ -25,7 +26,6 @@ from domain import (
 
 SUPPORTED_DOCUMENT_SUFFIXES: dict[str, DocumentType] = {
     ".pdf": DocumentType.PDF,
-    ".md": DocumentType.MARKDOWN,
 }
 
 DEFAULT_IGNORED_DIR_NAMES = {
@@ -57,6 +57,7 @@ class DocumentScanOptions:
         default_factory=lambda: {name.lower() for name in DEFAULT_IGNORED_DIR_NAMES}
     )
     include_hidden: bool = False
+    use_llm_metadata: bool = False
     supported_suffixes: dict[str, DocumentType] = field(
         default_factory=lambda: dict(SUPPORTED_DOCUMENT_SUFFIXES)
     )
@@ -154,6 +155,19 @@ class LocalDocumentScanner:
             return False
         return path.suffix.lower() in self.options.supported_suffixes
 
+    def should_descend_directory(self, directory: Path, project_root: Path) -> bool:
+        """Return whether the scanner should recurse into one directory."""
+
+        normalized_ignored_dir_names = self.normalize_ignored_dir_names()
+        try:
+            relative_parts = directory.relative_to(project_root).parts
+        except ValueError:
+            relative_parts = directory.parts
+
+        if not self.options.include_hidden and any(part.startswith(".") for part in relative_parts):
+            return False
+        return not any(part.lower() in normalized_ignored_dir_names for part in relative_parts)
+
     def validate_project_root(self, project_root: Path) -> Path:
         """Validate and normalize a project root before scanning.
 
@@ -198,9 +212,17 @@ class LocalDocumentScanner:
         resolved_root = self.validate_project_root(project_root)
         discovered_paths: list[Path] = []
 
-        for path in resolved_root.rglob("*"):
-            if self.should_include_path(path):
-                discovered_paths.append(path.resolve())
+        for dirpath, dirnames, filenames in os.walk(resolved_root):
+            current_dir = Path(dirpath)
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if self.should_descend_directory(current_dir / dirname, resolved_root)
+            ]
+            for filename in filenames:
+                path = current_dir / filename
+                if self.should_include_path(path):
+                    discovered_paths.append(path.resolve())
 
         return sorted(discovered_paths)
 
@@ -240,7 +262,7 @@ class LocalDocumentScanner:
 
         if document_type == DocumentType.PDF:
             try:
-                metadata = self.pdf_parser.parse_pdf_metadata(path)
+                metadata = self.pdf_parser.parse_pdf_metadata(path, use_llm=self.options.use_llm_metadata)
             except Exception:
                 metadata = {}
 

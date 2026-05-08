@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 
 type ThreadSummary = {
   id: string;
@@ -12,11 +12,13 @@ export function ThreadSidebar({
   activeThreadId,
   onSelect,
   onNew,
+  onDelete,
 }: {
   threads: ThreadSummary[];
   activeThreadId: string;
   onSelect: (thread: ThreadSummary) => void;
   onNew: () => void;
+  onDelete: (thread: ThreadSummary) => void;
 }) {
   return (
     <div className="thread-sidebar">
@@ -33,14 +35,31 @@ export function ThreadSidebar({
         <div style={{ padding: "12px 8px", fontSize: 12, color: "var(--text-tertiary)" }}>暂无对话</div>
       ) : (
         threads.map((thread) => (
-          <button
+          <div
             key={thread.id}
             className={`thread-item ${thread.id === activeThreadId ? "active" : ""}`}
-            onClick={() => onSelect(thread)}
+            style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}
           >
-            <span className="thread-item-title">{thread.title}</span>
-            <span className="thread-item-time">{formatTime(thread.updatedAt)}</span>
-          </button>
+            <button
+              className="thread-item-select"
+              onClick={() => onSelect(thread)}
+              style={{ flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left", display: "flex", flexDirection: "column", gap: 2 }}
+            >
+              <span className="thread-item-title">{thread.title}</span>
+              <span className="thread-item-time">{formatTime(thread.updatedAt)}</span>
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(thread);
+              }}
+              title="删除对话"
+              style={{ flexShrink: 0, padding: "2px 4px" }}
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
         ))
       )}
     </div>

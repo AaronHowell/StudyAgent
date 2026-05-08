@@ -124,6 +124,9 @@ class DocumentRepository(Protocol):
     def get_by_path(self, project_id: str, path: str) -> Document | None:
         """Load one document by project and canonical path."""
 
+    def get_by_content_hash(self, project_id: str, content_hash: str) -> Document | None:
+        """Load one document by project and immutable content hash."""
+
     def list_by_project(self, project_id: str) -> list[Document]:
         """Return all documents that belong to one project."""
 
