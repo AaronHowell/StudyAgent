@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
-import { BookOpen, MessageSquare, AlertCircle } from "lucide-react";
+import { BookOpen, MessageSquare, AlertCircle, Terminal } from "lucide-react";
 import { buildDocumentFileUrl } from "./PaperLabChatPanel";
 import type { DocumentImage, ScannedDocument } from "./types";
 import { useDocuments } from "./hooks/useDocuments";
@@ -9,10 +9,12 @@ import { PaperReader } from "./components/reader/PaperReader";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { ContextMenu, ContextMenuItem } from "./components/common/ContextMenu";
 import { GalleryModal } from "./components/common/GalleryModal";
+import { CodingModePanel } from "./components/coding/CodingModePanel";
+import "./components/coding/coding-mode.css";
 
 const apiBase = import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
 
-type WorkspaceView = "paper" | "ai";
+type WorkspaceView = "paper" | "ai" | "coding";
 type PaperView = "library" | "reader";
 type GalleryImage = DocumentImage & { preview_url: string };
 
@@ -28,6 +30,7 @@ function App() {
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [galleryLoading, setGalleryLoading] = useState(false);
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
+
 
   const [contextMenu, setContextMenu] = useState<{
     visible: boolean; x: number; y: number; document: ScannedDocument | null;
@@ -195,6 +198,15 @@ function App() {
               <MessageSquare size={14} />
               AI 对话
             </button>
+            <button
+              className={`workspace-tab ${workspace === "coding" ? "active" : ""}`}
+              role="tab"
+              aria-selected={workspace === "coding"}
+              onClick={() => setWorkspace("coding")}
+            >
+              <Terminal size={14} />
+              Coding 复现
+            </button>
           </div>
         </div>
 
@@ -253,6 +265,12 @@ function App() {
               onOpenGallery={() => selectedDocument && void openGallery(selectedDocument)}
             />
           )
+        ) : workspace === "coding" ? (
+          /* Coding Mode */
+          <CodingModePanel
+            paperContext={selectedDocument ? `Title: ${selectedDocument.title}\nFile: ${selectedDocument.path}` : ""}
+            onExit={() => setWorkspace("ai")}
+          />
         ) : (
           /* AI workspace */
           <div className="ai-workspace">
