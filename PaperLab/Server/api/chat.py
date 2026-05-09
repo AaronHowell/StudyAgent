@@ -39,6 +39,7 @@ from configs import DEFAULT_THREAD_ID
 from orchestration.guidance_queue import push_guidance_message
 from orchestration.supervisor import graph
 from session_storage import SessionCheckpoint
+from session_storage import SessionMessageRecord
 from session_storage import SessionStorageService
 
 
@@ -75,6 +76,21 @@ def _coerce_message(message: ChatMessageInput) -> BaseMessage:
     return AIMessage(content=message.content)
 
 
+def _restore_message(message: SessionMessageRecord) -> BaseMessage:
+    payload = {
+        "content": message.content,
+        "id": message.id,
+        "additional_kwargs": dict(message.additional_kwargs or {}),
+        "response_metadata": dict(message.response_metadata or {}),
+    }
+    message_type = str(message.type or message.role or "human").strip().lower()
+    if message_type in {"human", "user"}:
+        return HumanMessage(**payload)
+    if message_type == "system":
+        return SystemMessage(**payload)
+    return AIMessage(**payload)
+
+
 def _serialize_message(message: BaseMessage) -> ChatMessagePayload:
     role = getattr(message, "type", None)
     return ChatMessagePayload(
@@ -103,6 +119,37 @@ def _serialize_interrupt(raw_interrupt: Any) -> ChatInterruptPayload:
         id=str(getattr(raw_interrupt, "id", "")),
         value=value,
     )
+
+
+def _restore_checkpoint_values(checkpoint: SessionCheckpoint | None) -> dict[str, Any]:
+    if checkpoint is None:
+        return {}
+    return {
+        "active_turn_id": checkpoint.active_turn_id,
+        "iteration_count": checkpoint.iteration_count,
+        "max_iterations": checkpoint.max_iterations,
+        "answer_confident": checkpoint.answer_confident,
+        "stop_reason": checkpoint.stop_reason,
+        "processed_human_message_count": checkpoint.processed_human_message_count,
+        "intervention_count": checkpoint.intervention_count,
+    }
+
+
+def _hydrate_graph_from_restored_session(
+    *,
+    project_id: str,
+    thread_id: str,
+    restored_messages: list[BaseMessage],
+    checkpoint: SessionCheckpoint | None,
+) -> None:
+    config = _thread_config(project_id=project_id, thread_id=thread_id)
+    snapshot = graph.get_state(config)
+    existing_messages = list(dict(snapshot.values or {}).get("messages", []) or [])
+    if existing_messages:
+        return
+    update: dict[str, Any] = {"messages": restored_messages}
+    update.update(_restore_checkpoint_values(checkpoint))
+    graph.update_state(config, update)
 
 
 def _serialize_state_snapshot(
@@ -335,21 +382,18 @@ def restore_session(
     project_id: str = Query(..., description="Target project identifier"),
 ) -> SessionRestoreResponse:
     restored = get_session_storage().load_session(project_id=project_id, session_id=session_id)
+    restored_messages = [_restore_message(message) for message in restored.messages]
+    _hydrate_graph_from_restored_session(
+        project_id=project_id,
+        thread_id=restored.thread_id,
+        restored_messages=restored_messages,
+        checkpoint=restored.checkpoint,
+    )
     return _session_restore_response(
         session_id=session_id,
         project_id=project_id,
         thread_id=restored.thread_id,
-        values={
-            "messages": [
-                _coerce_message(
-                    ChatMessageInput(
-                        type=message.type or message.role or "human",
-                        content=str(message.content),
-                    )
-                )
-                for message in restored.messages
-            ]
-        },
+        values={"messages": restored_messages},
         interrupts=[restored.checkpoint.interrupt] if restored.checkpoint and restored.checkpoint.interrupt else [],
         next_nodes=restored.checkpoint.next_nodes if restored.checkpoint else [],
         checkpoint=restored.checkpoint.to_dict() if restored.checkpoint else None,
@@ -363,11 +407,18 @@ def restore_session_snapshot(
     project_id: str = Query(..., description="Target project identifier"),
 ) -> ChatSessionSnapshotResponse:
     restored = get_session_storage().load_session(project_id=project_id, session_id=session_id)
+    restored_messages = [_restore_message(message) for message in restored.messages]
+    _hydrate_graph_from_restored_session(
+        project_id=project_id,
+        thread_id=restored.thread_id,
+        restored_messages=restored_messages,
+        checkpoint=restored.checkpoint,
+    )
     return _session_snapshot_response(
         session_id=session_id,
         project_id=project_id,
         thread_id=restored.thread_id,
-        values={"messages": restored.messages},
+        values={"messages": restored_messages},
         interrupts=[restored.checkpoint.interrupt] if restored.checkpoint and restored.checkpoint.interrupt else [],
         next_nodes=restored.checkpoint.next_nodes if restored.checkpoint else [],
         checkpoint=restored.checkpoint.to_dict() if restored.checkpoint else None,
@@ -426,11 +477,12 @@ async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
     graph_input = _coerce_graph_input(request)
 
     async def event_stream():
-        previous_messages: list[BaseMessage] = []
         started_turn_ids: set[str] = set()
         completed_turn_ids: set[str] = set()
         try:
             _apply_command_update(request)
+            baseline_snapshot = graph.get_state(config)
+            previous_messages: list[BaseMessage] = list(dict(baseline_snapshot.values or {}).get("messages", []) or [])
             async for state in graph.astream(graph_input, config=config, stream_mode="values"):
                 values = dict(state or {})
                 interrupts = list(values.get("__interrupt__", ()) or ())
@@ -457,6 +509,8 @@ async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
                                 yield _sse_frame("trace_item_delta", delta_payload)
                             yield _sse_frame("trace_item_completed", completed_payload)
                     elif role == "ai":
+                        if str(metadata.get("artifact_type") or "") != "answer":
+                            continue
                         turn_id = str(metadata.get("turn_id") or getattr(message, "id", "") or f"turn_{index}")
                         if turn_id not in started_turn_ids:
                             started_turn_ids.add(turn_id)

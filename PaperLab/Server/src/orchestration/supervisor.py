@@ -306,13 +306,13 @@ def _memory_write_tool_schema() -> dict[str, object]:
         "function": {
             "name": "decide_memory_write",
             "description": (
-                "Decide whether this completed turn contains a stable, reusable memory. "
-                "Default to should_write=false unless the memory is clearly long-term useful."
+                "Decide whether to write a cross-session long-term memory from this completed turn. "
+                "This memory is durable across future sessions, so default to no write unless the content is clearly stable and reusable."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "should_write": {"type": "boolean"},
+                    "action": {"type": "string", "enum": ["none", "store"]},
                     "memory_type": {
                         "type": "string",
                         "enum": [
@@ -324,7 +324,7 @@ def _memory_write_tool_schema() -> dict[str, object]:
                     "content": {"type": "string"},
                     "reason": {"type": "string"},
                 },
-                "required": ["should_write", "memory_type", "content", "reason"],
+                "required": ["action", "memory_type", "content", "reason"],
             },
         },
     }
@@ -353,6 +353,7 @@ def _parse_continue_loop_decision(raw_answer: Any) -> dict[str, object]:
 
 def _default_memory_write_decision() -> dict[str, object]:
     return {
+        "action": "none",
         "should_write": False,
         "memory_type": MemoryType.RESEARCH_EPISODE.value,
         "content": "",
@@ -370,14 +371,19 @@ def _parse_memory_write_decision(raw_answer: Any) -> dict[str, object]:
         return _default_memory_write_decision()
 
     args = _coerce_tool_call_args(tool_calls[0])
-    should_write = bool(args.get("should_write", False))
+    action = str(args.get("action") or "none").strip().lower()
+    if action not in {"none", "store"}:
+        action = "none"
+    should_write = action == "store"
     content = str(args.get("content") or "").strip()
     memory_type = str(args.get("memory_type") or MemoryType.RESEARCH_EPISODE.value)
     if memory_type not in {item.value for item in MemoryType}:
         memory_type = MemoryType.RESEARCH_EPISODE.value
     if not content:
         should_write = False
+        action = "none"
     return {
+        "action": action,
         "should_write": should_write,
         "memory_type": memory_type,
         "content": content if should_write else "",
@@ -437,6 +443,76 @@ def _coerce_memory_type(value: object) -> MemoryType:
         return MemoryType(str(value))
     except ValueError:
         return MemoryType.RESEARCH_EPISODE
+
+
+def _is_cross_paper_synthesis_question(question: str) -> bool:
+    normalized = str(question or "").strip().lower()
+    if not normalized:
+        return False
+    cues = (
+        "综合",
+        "综述",
+        "现状",
+        "研究现状",
+        "研究图景",
+        "研究脉络",
+        "比较",
+        "对比",
+        "landscape",
+        "survey",
+        "state of the art",
+        "state-of-the-art",
+        "research state",
+        "research landscape",
+        "compare",
+        "comparison",
+    )
+    return any(cue in normalized for cue in cues)
+
+
+def _structure_retrieval_task_for_synthesis(
+    *,
+    question: str,
+    retrieval_query: str,
+    retrieval_reason: str,
+) -> tuple[str, str, dict[str, Any]]:
+    if not _is_cross_paper_synthesis_question(question):
+        return retrieval_query, retrieval_reason, {}
+
+    structured_query = (
+        "Cross-paper evidence gathering for final synthesis.\n"
+        f"User question:\n{question}\n\n"
+        "For each relevant paper in the local corpus, gather the minimum evidence needed for synthesis:\n"
+        "1. research problem / target task\n"
+        "2. core method, framework, or system\n"
+        "3. main findings or claimed improvements\n"
+        "4. scope, assumptions, or limitations if visible from abstract/introduction/conclusion\n\n"
+        "Then organize the retrieved evidence into a compact comparative view grouped by theme, such as:\n"
+        "- agent or AI skill security\n"
+        "- vulnerability detection and analysis\n"
+        "- exploit generation or offensive automation\n"
+        "- patch tracking or vulnerability management\n\n"
+        "Do not write the final literature review. Focus on evidence collection and structured paper-level findings that the supervisor can synthesize."
+    )
+    structured_reason = (
+        "Need structured cross-paper evidence rather than a direct literature review. "
+        "Retrieve per-paper problem/method/findings/scope so the supervisor can synthesize the final research-state answer."
+    )
+    return structured_query, structured_reason, {
+        "retrieval_mode": "cross_paper_synthesis",
+        "evidence_fields": [
+            "research_problem",
+            "method_or_system",
+            "main_findings",
+            "scope_or_limitations",
+        ],
+        "synthesis_axes": [
+            "agent_security",
+            "vulnerability_detection",
+            "exploit_generation",
+            "patch_management",
+        ],
+    }
 
 
 def _materialize_intervention_update(
@@ -799,6 +875,11 @@ async def main_route_node(
     tool_task: AgentTask | None = None
 
     if run_retrieval:
+        retrieval_query, retrieval_reason, retrieval_metadata = _structure_retrieval_task_for_synthesis(
+            question=question,
+            retrieval_query=retrieval_query,
+            retrieval_reason=retrieval_reason,
+        )
         retrieve_task = AgentTask(
             task_id=f"task_ret_{uuid4().hex[:8]}",
             task_type="local_retrieval",
@@ -810,7 +891,7 @@ async def main_route_node(
                 "chunk_limit": request_config.chunk_limit,
                 "asset_limit": request_config.asset_limit,
             },
-            metadata={"project_id": request_config.project_id},
+            metadata={"project_id": request_config.project_id, **retrieval_metadata},
         )
         task_messages.append(_build_agent_task_message(turn_id=turn_id, task=retrieve_task))
 
@@ -1118,7 +1199,17 @@ async def assess_node(
     stop_reason = ""
     if must_answer and not answer_confident:
         stop_reason = "max_iterations_reached"
-        answer_confident = True
+        return await _force_answer_after_stop_condition(
+            state=state,
+            turn_id=turn_id,
+            question=question,
+            short_term_message=short_term_message,
+            memory_message=memory_message,
+            intervention_messages=intervention_messages,
+            retrieve_result=retrieve_result,
+            tool_result=tool_result,
+            stop_reason=stop_reason,
+        )
     if answer_confident:
         return _build_assistant_answer_update(
             state=state,
@@ -1162,15 +1253,71 @@ async def assess_node(
     }
 
 
+async def _force_answer_after_stop_condition(
+    *,
+    state: PaperLabGraphState,
+    turn_id: str,
+    question: str,
+    short_term_message: BaseMessage | None,
+    memory_message: BaseMessage | None,
+    intervention_messages: list[BaseMessage],
+    retrieve_result: dict[str, Any],
+    tool_result: dict[str, Any],
+    stop_reason: str,
+) -> PaperLabGraphState:
+    synthesis_prompt = build_synthesis_prompt(
+        question=question,
+        short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
+        memory_context=_message_text(memory_message.content) if memory_message is not None else "",
+        interventions=[_message_text(message.content) for message in intervention_messages],
+        specialist_payloads=[
+            _stringify_for_prompt(retrieve_result) if retrieve_result else "",
+            _stringify_for_prompt(tool_result) if tool_result else "",
+        ],
+    )
+    forced_prompt = (
+        synthesis_prompt
+        + "\n\nThe evidence loop stop condition has been reached. "
+        + "You must provide the best grounded answer possible using the available specialist results. "
+        + "Prefer a concise synthesis over saying that evidence is insufficient. "
+        + "State uncertainty only where it materially affects the answer."
+    )
+    raw_forced_answer = await _runtime().chat_model.bind_tools(_memory_write_schema()).ainvoke(
+        _append_memory_write_policy(forced_prompt)
+    )
+    answer_text, progress_summary = parse_structured_assistant_output(
+        _message_text(getattr(raw_forced_answer, "content", raw_forced_answer))
+    )
+    return _build_assistant_answer_update(
+        state=state,
+        raw_answer=raw_forced_answer,
+        answer_text=answer_text or "已基于当前检索结果生成最佳可得回答。",
+        progress_summary=progress_summary,
+        retrieve_result=retrieve_result,
+        tool_result=tool_result,
+        turn_id=turn_id,
+        question=question,
+        short_term_message=short_term_message,
+        memory_message=memory_message,
+        intervention_messages=intervention_messages,
+        answer_confident=True,
+        stop_reason=stop_reason,
+    )
+
+
 def _append_memory_write_policy(prompt: str) -> str:
     return (
         prompt
         + "\n\nMemory write policy:\n"
-        + "- You may call `decide_memory_write` at most once.\n"
-        + "- Default to `should_write=false`.\n"
-        + "- Write memory only for stable long-term user preferences, durable project facts, or reusable research lessons.\n"
-        + "- Do not write ordinary answers, temporary tasks, uncertain claims, private/sensitive data, or duplicate memory.\n"
-        + "- If unsure, call `decide_memory_write` with `should_write=false`."
+        + "- You must call `decide_memory_write` exactly once after producing the final answer.\n"
+        + "- This memory is long-term and cross-session, not short-term scratch space.\n"
+        + "- Default to `action=none`.\n"
+        + "- Use `action=store` only for stable long-term user preferences, durable project facts, shared project constraints, or reusable research lessons.\n"
+        + "- Stable name/preferred form of address, enduring collaboration preferences, and declared long-term research directions are valid long-term memory candidates.\n"
+        + "- Do not store ordinary answers, temporary tasks, uncertain claims, private/sensitive data, or details that can simply be re-retrieved from papers later.\n"
+        + "- If you say in the answer that you will remember, have remembered, or will use this preference later, the tool call must be `action=store` with the exact durable fact to persist.\n"
+        + "- If not storing, do not claim that the information has been remembered across sessions.\n"
+        + "- If unsure, call `decide_memory_write` with `action=none`."
     )
 
 
@@ -1286,11 +1433,15 @@ async def synthesize_node(
     memory_decision_prompt = (
         synthesis_prompt
         + "\n\nMemory write policy:\n"
-        + "- You may call `decide_memory_write` at most once.\n"
-        + "- Default to `should_write=false`.\n"
-        + "- Write memory only for stable long-term user preferences, durable project facts, or reusable research lessons.\n"
-        + "- Do not write ordinary answers, temporary tasks, uncertain claims, private/sensitive data, or duplicate memory.\n"
-        + "- If unsure, call `decide_memory_write` with `should_write=false`."
+        + "- You must call `decide_memory_write` exactly once after producing the final answer.\n"
+        + "- This memory is long-term and cross-session, not short-term scratch space.\n"
+        + "- Default to `action=none`.\n"
+        + "- Use `action=store` only for stable long-term user preferences, durable project facts, shared project constraints, or reusable research lessons.\n"
+        + "- Stable name/preferred form of address, enduring collaboration preferences, and declared long-term research directions are valid long-term memory candidates.\n"
+        + "- Do not store ordinary answers, temporary tasks, uncertain claims, private/sensitive data, duplicate memory, or details that can simply be re-retrieved from papers later.\n"
+        + "- If you say in the answer that you will remember, have remembered, or will use this preference later, the tool call must be `action=store` with the exact durable fact to persist.\n"
+        + "- If not storing, do not claim that the information has been remembered across sessions.\n"
+        + "- If unsure, call `decide_memory_write` with `action=none`."
     )
     tool_observations: list[dict[str, object]] = []
     tool_trace_messages: list[BaseMessage] = []
@@ -1445,6 +1596,57 @@ async def recall_memory_node(
     return {"messages": [message]}
 
 
+def _memory_write_trace_message(
+    *,
+    turn_id: str,
+    decision: dict[str, object],
+    stored: bool,
+) -> BaseMessage:
+    action = str(decision.get("action") or "none")
+    reason = str(decision.get("reason") or "").strip()
+    content = str(decision.get("content") or "").strip()
+    memory_type = str(decision.get("memory_type") or "").strip()
+    if action != "store":
+        body = "长期记忆写入决策：none"
+        if reason:
+            body += f"\nReason: {reason}"
+        return _build_tool_message(
+            turn_id=turn_id,
+            name="store_memory",
+            content=body,
+            metadata={
+                "artifact_type": "memory_write_result",
+                "action": "none",
+                "stored": False,
+                "reason": reason,
+                "reusable": False,
+            },
+        )
+
+    body = "长期记忆写入决策：store"
+    if memory_type:
+        body += f"\nType: {memory_type}"
+    if reason:
+        body += f"\nReason: {reason}"
+    if content:
+        body += f"\nContent: {content}"
+    body += f"\nStatus: {'stored' if stored else 'skipped'}"
+    return _build_tool_message(
+        turn_id=turn_id,
+        name="store_memory",
+        content=body,
+        metadata={
+            "artifact_type": "memory_write_result",
+            "action": "store",
+            "stored": stored,
+            "memory_type": memory_type,
+            "reason": reason,
+            "content": content,
+            "reusable": False,
+        },
+    )
+
+
 async def store_memory_node(
     state: PaperLabGraphState,
     config: RunnableConfig | None = None,
@@ -1466,17 +1668,18 @@ async def store_memory_node(
 
     assistant_meta = _message_meta(assistant_message)
     memory_decision = dict(assistant_meta.get("memory_write_decision", {}) or {})
+    turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     if not bool(memory_decision.get("should_write", False)):
-        return {}
+        return {"messages": [_memory_write_trace_message(turn_id=turn_id, decision=memory_decision, stored=False)]}
     memory_content = str(memory_decision.get("content") or "").strip()
     if not memory_content:
-        return {}
+        return {"messages": [_memory_write_trace_message(turn_id=turn_id, decision=memory_decision, stored=False)]}
 
     memory_service = build_memory_service(
         backend=_memory_backend(),
         settings=AgentSettings.from_env(),
     )
-    memory_service.store_memory(
+    stored = memory_service.store_memory(
         role="supervisor",
         project_id=request_config.project_id,
         thread_id=request_config.thread_id,
@@ -1490,7 +1693,7 @@ async def store_memory_node(
         },
         memory_type=_coerce_memory_type(memory_decision.get("memory_type")),
     )
-    return {}
+    return {"messages": [_memory_write_trace_message(turn_id=turn_id, decision=memory_decision, stored=stored)]}
 
 
 def build_graph():

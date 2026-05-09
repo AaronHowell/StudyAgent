@@ -157,6 +157,17 @@ class _FakeChunkRepository:
                 page=3,
                 section="Method",
             )
+            ,
+            Chunk(
+                id="chunk-2",
+                project_id="project-a",
+                document_id="doc-1",
+                chunk_index=1,
+                chunk_type=ChunkType.TEXT,
+                text="Transformer abstract summary chunk",
+                page=1,
+                section="Abstract",
+            )
         ]
 
     def list_by_document(self, document_id: str) -> list[Chunk]:
@@ -308,3 +319,59 @@ def test_parse_retrieval_intent_plan_respects_model_output() -> None:
     assert plan.need_chunk_fetch is False
     assert plan.need_asset_search is False
     assert plan.max_steps == 3
+
+
+def test_execute_retrieval_tool_supports_batch_mysql_chunk_fetch() -> None:
+    runtime = _FakeRuntime()
+    state = retriever_agent._RetrievalPlanState()
+    task = AgentTask(
+        task_id="task-3",
+        task_type="local_retrieval",
+        agent_name="retrieval_agent",
+        query="Summarize the corpus",
+        reason="Need early pages from multiple documents",
+        constraints={},
+        metadata={},
+    )
+
+    result = asyncio.run(
+        retriever_agent._execute_retrieval_tool(
+            tool_name="fetch_documents_chunks_mysql",
+            args={"document_ids": ["doc-1"], "page_from": 1, "page_to": 3, "limit_per_document": 3, "total_limit": 5},
+            use_case=runtime.retrieve_evidence_use_case,
+            request_config=AgentRequestConfig(project_id="project-a"),
+            plan_state=state,
+            task=task,
+        )
+    )
+
+    assert len(result["chunks"]) >= 2
+    assert any(item["section"] == "Abstract" for item in result["chunks"])
+
+
+def test_execute_retrieval_tool_supports_mysql_chunk_text_search() -> None:
+    runtime = _FakeRuntime()
+    state = retriever_agent._RetrievalPlanState()
+    task = AgentTask(
+        task_id="task-4",
+        task_type="local_retrieval",
+        agent_name="retrieval_agent",
+        query="Find abstract",
+        reason="Need literal keyword search",
+        constraints={},
+        metadata={},
+    )
+
+    result = asyncio.run(
+        retriever_agent._execute_retrieval_tool(
+            tool_name="search_chunks_mysql",
+            args={"keyword": "abstract", "limit": 5},
+            use_case=runtime.retrieve_evidence_use_case,
+            request_config=AgentRequestConfig(project_id="project-a"),
+            plan_state=state,
+            task=task,
+        )
+    )
+
+    assert len(result["chunks"]) == 1
+    assert result["chunks"][0]["chunk_id"] == "chunk-2"

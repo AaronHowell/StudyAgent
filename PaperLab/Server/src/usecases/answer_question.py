@@ -8,6 +8,7 @@ from typing import Iterable
 
 from domain import AssetCitation, Citation, EvidencePack, LLMProvider
 from generation.citation_formatter import serialize_asset_citation, serialize_citation
+from generation.asset_selection import filter_informative_asset_hits
 from prompts.builders import build_grounded_answer_prompt
 
 
@@ -54,13 +55,14 @@ class AnswerQuestionUseCase:
             asset_limit=asset_limit,
         )
         prompt = self._build_prompt(question, evidence_pack)
+        filtered_assets = filter_informative_asset_hits(evidence_pack.assets, question=question)
         yield AnswerStreamEvent(
             event="meta",
             data={
                 "question": question,
                 "document_count": len(evidence_pack.documents),
                 "chunk_count": len(evidence_pack.text_chunks),
-                "asset_count": len(evidence_pack.assets),
+                "asset_count": len(filtered_assets),
                 "multimodal": False,
                 "visual_evidence_mode": "metadata",
             },
@@ -83,7 +85,7 @@ class AnswerQuestionUseCase:
                 ],
                 "asset_sources": [
                     self._serialize_asset_source(hit, ref_id=f"A{index + 1}")
-                    for index, hit in enumerate(evidence_pack.assets)
+                    for index, hit in enumerate(filtered_assets)
                 ],
             },
         )

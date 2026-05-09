@@ -7,6 +7,7 @@ from integrations.llm.rerankers import OpenAICompatibleRerankerConfig, OpenAICom
 from integrations.mcp.mcp_tools import McpToolProvider, McpToolProviderConfig
 from integrations.mcp.web_search import DDGSWebSearchConfig, DDGSWebSearchProvider
 from integrations.storage.markdown_memory_store import (
+    ChatModelMarkdownMemoryWriteManager,
     ChatModelMarkdownMemorySelector,
     MarkdownMemoryStore,
 )
@@ -23,6 +24,7 @@ from integrations.vectorstore.qdrant_store import QdrantChunkVectorStore, Qdrant
 __all__ = [
     "DDGSWebSearchConfig",
     "DDGSWebSearchProvider",
+    "ChatModelMarkdownMemoryWriteManager",
     "ChatModelMarkdownMemorySelector",
     "MarkdownMemoryStore",
     "Mem0MemoryConfig",

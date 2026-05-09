@@ -127,6 +127,49 @@ def test_retrieve_assets_fuses_summary_and_caption_hits() -> None:
     assert "summary" in raw_log
 
 
+def test_retrieve_assets_filters_low_value_images_and_uses_rich_rerank_text() -> None:
+    from usecases.retrieve_evidence import RetrieveEvidenceUseCase
+
+    informative = _asset(
+        "asset-informative",
+        "Overview diagram for the Tracer patch tracking pipeline.",
+        "Figure 2: Tracer workflow overview.",
+        asset_type="workflow_diagram",
+    )
+    low_value = _asset(
+        "asset-low",
+        "Title and author information from the academic paper.",
+        "",
+        asset_type="unknown",
+        asset_label="page_0001_image_001.png",
+        file_name="page_0001_image_001.png",
+        page_number=1,
+    )
+    reranker = FakeRerankerProvider()
+    use_case = RetrieveEvidenceUseCase(
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=FakeFilteredRetrievalVectorStore(),
+        document_repository=FakeDocumentRepository(),
+        chunk_repository=FakeChunkRepository(),
+        asset_repository=FakeAssetRepository([informative, low_value]),
+        reranker_provider=reranker,
+    )
+
+    hits, _ = use_case.retrieve_assets(
+        query="explain the tracer workflow figure",
+        project_id="project-1",
+        document_ids=["doc-1"],
+        query_vector=[1.0, 0.0],
+        limit=2,
+    )
+
+    assert [hit.asset_id for hit in hits] == ["asset-informative"]
+    assert len(reranker.calls) == 1
+    assert "label: Figure asset-informative" in reranker.calls[0]["candidates"][0]
+    assert "asset_type: workflow_diagram" in reranker.calls[0]["candidates"][0]
+    assert "summary: Overview diagram for the Tracer patch tracking pipeline." in reranker.calls[0]["candidates"][0]
+
+
 def test_answer_done_event_contains_displayable_asset_sources() -> None:
     asset = _asset("asset-1", "Figure summary", "Figure caption")
     evidence_pack = FakeEvidencePack(asset)
@@ -204,16 +247,26 @@ def test_document_profile_uses_metadata_summary_and_keywords() -> None:
     assert profile.metadata["year"] == 2026
 
 
-def _asset(asset_id: str, summary: str, caption: str) -> DocumentAsset:
+def _asset(
+    asset_id: str,
+    summary: str,
+    caption: str,
+    *,
+    asset_type: str = "unknown",
+    asset_label: str | None = None,
+    file_name: str | None = None,
+    page_number: int = 2,
+) -> DocumentAsset:
     return DocumentAsset(
         id=asset_id,
         document_id="doc-1",
-        page_number=2,
+        page_number=page_number,
         file_path=f"C:/{asset_id}.png",
-        file_name=f"{asset_id}.png",
-        asset_label=f"Figure {asset_id}",
+        file_name=file_name or f"{asset_id}.png",
+        asset_label=asset_label or f"Figure {asset_id}",
         caption=caption,
         summary=summary,
+        asset_type=asset_type,
         media_type="image/png",
         metadata={"project_id": "project-1"},
     )
@@ -225,6 +278,15 @@ class FakeRetrievalVectorStore:
             return [ScoredId("asset-summary", 0.7), ScoredId("asset-caption", 0.1)]
         if vector_name == "caption":
             return [ScoredId("asset-caption", 0.95)]
+        return []
+
+
+class FakeFilteredRetrievalVectorStore:
+    def search_assets(self, *, vector_name: str, **_: object) -> list[ScoredId]:
+        if vector_name == "summary":
+            return [ScoredId("asset-low", 0.8), ScoredId("asset-informative", 0.7)]
+        if vector_name == "caption":
+            return [ScoredId("asset-informative", 0.95)]
         return []
 
 
@@ -243,6 +305,15 @@ class FakeAssetRepository:
 
     def list_by_ids(self, asset_ids: list[str]) -> list[DocumentAsset]:
         return [self.assets[asset_id] for asset_id in asset_ids if asset_id in self.assets]
+
+
+class FakeRerankerProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def rerank(self, query: str, candidates: list[str], top_k: int) -> list[float]:
+        self.calls.append({"query": query, "candidates": candidates, "top_k": top_k})
+        return [1.0 for _ in candidates]
 
 
 class FakeStreamingLLM:

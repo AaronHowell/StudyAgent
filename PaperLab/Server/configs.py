@@ -272,9 +272,11 @@ class AgentSettings(BaseSettings):
     mcp_timeout_seconds: int = 20
     mcp_servers: list[dict[str, object]] | None = None
     agent_loop_max_steps: int = 5
+    retrieval_agent_max_steps: int = 5
     redis_enabled: bool = False
     redis_db: int = 0
     redis_thread_context_ttl: int = 21600
+    redis_retrieval_context_ttl: int = 21600
     redis_retrieval_cache_ttl: int = 3600
     redis_web_cache_ttl: int = 1800
     redis_lock_ttl: int = 120
@@ -288,6 +290,7 @@ class AgentSettings(BaseSettings):
     checkpoint_redis_checkpoint_write_prefix: str = "checkpoint_write"
     short_term_raw_turns: int = 3
     short_term_summary_turns: int = 4
+    retrieval_context_queue_size: int = 8
 
     def __post_init__(self) -> None:
         if not self.memory_llm_base_url:
@@ -360,6 +363,11 @@ class AgentSettings(BaseSettings):
             redis_enabled=cls._bool_env("PAPERLAB_REDIS_ENABLED", "STUDY_AGENT_REDIS_ENABLED", False),
             redis_db=cls._int_env("PAPERLAB_REDIS_DB", "STUDY_AGENT_REDIS_DB", 0),
             redis_thread_context_ttl=cls._int_env("PAPERLAB_REDIS_THREAD_CONTEXT_TTL", "STUDY_AGENT_REDIS_THREAD_CONTEXT_TTL", 21600),
+            redis_retrieval_context_ttl=cls._int_env(
+                "PAPERLAB_REDIS_RETRIEVAL_CONTEXT_TTL",
+                "STUDY_AGENT_REDIS_RETRIEVAL_CONTEXT_TTL",
+                21600,
+            ),
             redis_retrieval_cache_ttl=cls._int_env("PAPERLAB_REDIS_RETRIEVAL_CACHE_TTL", "STUDY_AGENT_REDIS_RETRIEVAL_CACHE_TTL", 3600),
             redis_web_cache_ttl=cls._int_env("PAPERLAB_REDIS_WEB_CACHE_TTL", "STUDY_AGENT_REDIS_WEB_CACHE_TTL", 1800),
             redis_lock_ttl=cls._int_env("PAPERLAB_REDIS_LOCK_TTL", "STUDY_AGENT_REDIS_LOCK_TTL", 120),
@@ -393,8 +401,18 @@ class AgentSettings(BaseSettings):
             mcp_timeout_seconds=cls._int_env("PAPERLAB_MCP_TIMEOUT_SECONDS", "STUDY_AGENT_MCP_TIMEOUT_SECONDS", 20),
             mcp_servers=mcp_servers,
             agent_loop_max_steps=cls._int_env("PAPERLAB_AGENT_LOOP_MAX_STEPS", "STUDY_AGENT_AGENT_LOOP_MAX_STEPS", 5),
+            retrieval_agent_max_steps=cls._int_env(
+                "PAPERLAB_RETRIEVAL_AGENT_MAX_STEPS",
+                "STUDY_AGENT_RETRIEVAL_AGENT_MAX_STEPS",
+                5,
+            ),
             short_term_raw_turns=cls._int_env("PAPERLAB_SHORT_TERM_RAW_TURNS", "STUDY_AGENT_SHORT_TERM_RAW_TURNS", 3),
             short_term_summary_turns=cls._int_env("PAPERLAB_SHORT_TERM_SUMMARY_TURNS", "STUDY_AGENT_SHORT_TERM_SUMMARY_TURNS", 4),
+            retrieval_context_queue_size=cls._int_env(
+                "PAPERLAB_RETRIEVAL_CONTEXT_QUEUE_SIZE",
+                "STUDY_AGENT_RETRIEVAL_CONTEXT_QUEUE_SIZE",
+                8,
+            ),
         )
 
 

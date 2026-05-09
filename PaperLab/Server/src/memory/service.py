@@ -122,7 +122,7 @@ class MemoryService:
             return False
 
         try:
-            self.backend.remember_messages(
+            stored = self.backend.remember_messages(
                 project_id=project_id,
                 thread_id=thread_id,
                 messages=[
@@ -135,7 +135,7 @@ class MemoryService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Long-term memory store failed; continuing without persistence: %s", exc)
             return False
-        return True
+        return bool(stored)
 
     def store_memory(
         self,
@@ -153,7 +153,7 @@ class MemoryService:
             return False
 
         try:
-            self.backend.remember_messages(
+            stored = self.backend.remember_messages(
                 project_id=project_id,
                 thread_id=thread_id,
                 messages=[
@@ -165,7 +165,7 @@ class MemoryService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Long-term memory store failed; continuing without persistence: %s", exc)
             return False
-        return True
+        return bool(stored)
 
     def build_short_term_context(
         self,

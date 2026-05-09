@@ -3,6 +3,7 @@ from __future__ import annotations
 from domain import Citation
 from domain import EvidencePack
 from domain import MemoryItem
+from generation.asset_selection import filter_informative_asset_hits
 
 
 def build_assistant_metadata(citations: list[Citation]) -> dict[str, object]:
@@ -35,6 +36,7 @@ def build_asset_citations_metadata(asset_citations: list[object]) -> list[dict[s
 
 
 def build_asset_sources_metadata(asset_hits: list[object]) -> list[dict[str, object]]:
+    filtered_hits = filter_informative_asset_hits(asset_hits)
     return [
         {
             "ref_id": f"A{index + 1}",
@@ -48,7 +50,7 @@ def build_asset_sources_metadata(asset_hits: list[object]) -> list[dict[str, obj
             "file_name": getattr(hit, "file_name", ""),
             "file_url": f"/documents/assets/{getattr(hit, 'asset_id', '')}/content",
         }
-        for index, hit in enumerate(asset_hits)
+        for index, hit in enumerate(filtered_hits)
     ]
 
 

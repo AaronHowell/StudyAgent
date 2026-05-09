@@ -83,6 +83,18 @@ class RedisCacheStore:
     def load_cached_retrieval(self, project_id: str, query: str) -> dict[str, Any] | None:
         return self.get_json(self._retrieval_key(project_id, query))
 
+    def save_retrieval_context(
+        self,
+        project_id: str,
+        thread_id: str,
+        payload: dict[str, Any],
+        ttl_seconds: int = 21600,
+    ) -> None:
+        self.set_json(self._retrieval_context_key(project_id, thread_id), payload, ttl_seconds)
+
+    def load_retrieval_context(self, project_id: str, thread_id: str) -> dict[str, Any] | None:
+        return self.get_json(self._retrieval_context_key(project_id, thread_id))
+
     def save_cached_web_search(self, query: str, payload: dict[str, Any], ttl_seconds: int = 1800) -> None:
         self.set_json(self._web_search_key(query), payload, ttl_seconds)
 
@@ -129,6 +141,10 @@ class RedisCacheStore:
     @staticmethod
     def _web_search_key(query: str) -> str:
         return f"paperlab:cache:web_search:{_digest(query)}"
+
+    @staticmethod
+    def _retrieval_context_key(project_id: str, thread_id: str) -> str:
+        return f"paperlab:retrieval_ctx:{project_id}:{thread_id}"
 
     @staticmethod
     def _url_fetch_key(url: str) -> str:

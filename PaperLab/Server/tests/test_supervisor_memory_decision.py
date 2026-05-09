@@ -65,6 +65,7 @@ def test_synthesize_node_binds_cautious_memory_decision_tool() -> None:
 
     assert model.bound_tools is not None
     assert model.bound_tools[0]["function"]["name"] == "decide_memory_write"
+    assert result["messages"][0].additional_kwargs["metadata"]["memory_write_decision"]["action"] == "none"
     assert result["messages"][0].additional_kwargs["metadata"]["memory_write_decision"]["should_write"] is False
 
 
@@ -74,7 +75,7 @@ def test_synthesize_node_records_true_memory_write_decision() -> None:
             {
                 "name": "decide_memory_write",
                 "args": {
-                    "should_write": True,
+                    "action": "store",
                     "memory_type": "preference",
                     "content": "用户偏好简洁回答。",
                     "reason": "Stable user preference.",
@@ -89,6 +90,7 @@ def test_synthesize_node_records_true_memory_write_decision() -> None:
 
     metadata = result["messages"][0].additional_kwargs["metadata"]
     assert metadata["memory_write_decision"] == {
+        "action": "store",
         "should_write": True,
         "memory_type": "preference",
         "content": "用户偏好简洁回答。",
@@ -104,14 +106,16 @@ def test_store_memory_node_skips_false_memory_decision() -> None:
         content="Final answer",
         metadata={
             "artifact_type": "answer",
-            "memory_write_decision": {"should_write": False, "content": ""},
+            "memory_write_decision": {"action": "none", "should_write": False, "content": "", "reason": "No stable cross-session memory."},
         },
     )
 
     with patch.object(supervisor, "_runtime", return_value=runtime):
-        asyncio.run(supervisor.store_memory_node({"messages": [_question(), answer]}))
+        result = asyncio.run(supervisor.store_memory_node({"messages": [_question(), answer], "active_turn_id": "turn-1"}))
 
     assert backend.remember_calls == []
+    assert len(result["messages"]) == 1
+    assert "长期记忆写入决策：none" in result["messages"][0].content
 
 
 def test_store_memory_node_writes_true_memory_decision() -> None:
@@ -123,6 +127,7 @@ def test_store_memory_node_writes_true_memory_decision() -> None:
         metadata={
             "artifact_type": "answer",
             "memory_write_decision": {
+                "action": "store",
                 "should_write": True,
                 "memory_type": "project_fact",
                 "content": "Project uses markdown memory.",
@@ -132,10 +137,12 @@ def test_store_memory_node_writes_true_memory_decision() -> None:
     )
 
     with patch.object(supervisor, "_runtime", return_value=runtime):
-        asyncio.run(supervisor.store_memory_node({"messages": [_question(), answer]}))
+        result = asyncio.run(supervisor.store_memory_node({"messages": [_question(), answer], "active_turn_id": "turn-1"}))
 
     assert len(backend.remember_calls) == 1
     assert backend.remember_calls[0]["messages"] == [
         {"role": "assistant", "content": "Project uses markdown memory."}
     ]
     assert backend.remember_calls[0]["memory_type"] == MemoryType.PROJECT_FACT
+    assert len(result["messages"]) == 1
+    assert "长期记忆写入决策：store" in result["messages"][0].content

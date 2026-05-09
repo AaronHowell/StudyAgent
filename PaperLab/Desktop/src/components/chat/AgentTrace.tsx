@@ -10,10 +10,38 @@ const TRACE_ICONS: Record<string, typeof Brain> = {
   web: Globe,
 };
 
+const LOW_SIGNAL_TRACE_TITLES = new Set([
+  "guidance_gate_pre_route",
+  "guidance_gate_post_route",
+  "guidance_gate_pre_assess",
+  "main_route_complete",
+  "parallel_specialists_complete",
+  "assess_complete",
+]);
+
 function traceItemLabel(item: ChatTraceItem): string {
   if (item.kind === "tool_call") return item.title || "工具调用";
   if (item.kind === "tool_result") return item.title || "工具结果";
   return item.title || "思考";
+}
+
+function isLowSignalTraceItem(item: ChatTraceItem): boolean {
+  if (item.kind !== "reasoning") return false;
+  if (LOW_SIGNAL_TRACE_TITLES.has(item.title)) return true;
+  const text = item.text.trim();
+  return (
+    text.startsWith("Loop checkpoint reached at ") ||
+    text === "Parallel specialist execution finished." ||
+    text.startsWith("MainRoute prepared ") ||
+    text.startsWith("Assess requested another routing iteration")
+  );
+}
+
+function traceItemCategory(item: ChatTraceItem): string {
+  const title = item.title.trim();
+  if (title === "长期记忆检索" || title === "长期记忆写入") return "memory";
+  if (title === "retrieval_agent" || title === "检索思路" || title.includes("检索")) return "retrieval";
+  return "default";
 }
 
 export function AgentTrace({
@@ -27,7 +55,8 @@ export function AgentTrace({
   collapsed: boolean;
   onToggle: () => void;
 }) {
-  if (items.length === 0) return null;
+  const visibleItems = items.filter((item) => !isLowSignalTraceItem(item));
+  if (visibleItems.length === 0) return null;
 
   const label = status === "streaming" ? "思考中" : collapsed ? "已完成思考" : "收起思考";
   const Icon = status === "streaming" ? Brain : ChevronDown;
@@ -40,11 +69,11 @@ export function AgentTrace({
       >
         <Icon size={14} />
         {label}
-        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>({items.length})</span>
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>({visibleItems.length})</span>
       </button>
       {!collapsed ? (
         <div className="trace-panel">
-          {items.map((item) => (
+          {visibleItems.map((item) => (
             <TraceItemRow key={item.id} item={item} />
           ))}
         </div>
@@ -55,9 +84,10 @@ export function AgentTrace({
 
 function TraceItemRow({ item }: { item: ChatTraceItem }) {
   const Icon = TRACE_ICONS[item.kind] || Brain;
+  const category = traceItemCategory(item);
 
   return (
-    <div className={`trace-item ${item.kind}`}>
+    <div className={`trace-item ${item.kind} ${category !== "default" ? `trace-item-${category}` : ""}`}>
       <div className="trace-item-head">
         <Icon size={14} />
         <span>{traceItemLabel(item)}</span>

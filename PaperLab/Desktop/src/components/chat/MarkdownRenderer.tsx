@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
 import type { AssetSourceRecord } from "../../usePaperLabStream";
+import { Modal } from "../common/Modal";
 
 const apiBase = import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -75,30 +76,61 @@ function InlinePictureReference({
   refId: string;
   assetSources: AssetSourceRecord[];
 }) {
+  const [previewOpen, setPreviewOpen] = useState(false);
   const source = assetSources.find((item, index) => (item.ref_id || `A${index + 1}`) === refId);
   if (!source) {
     return <span className="citation-chip">{refId}</span>;
   }
 
   return (
-    <figure className="asset-card inline-asset-reference">
-      {source.file_url ? (
-        <img
-          src={`${apiBase}${source.file_url}`}
-          alt={source.asset_label || source.file_name || refId}
-          loading="lazy"
-        />
-      ) : (
-        <div style={{ height: 120, display: "grid", placeItems: "center", color: "var(--text-tertiary)", background: "var(--bg-subtle)" }}>
-          预览不可用
+    <>
+      <figure className="asset-card inline-asset-reference">
+        <button
+          type="button"
+          className="inline-asset-trigger"
+          onClick={() => setPreviewOpen(true)}
+          aria-label={`放大查看 ${source.asset_label || source.file_name || refId}`}
+        >
+          {source.file_url ? (
+            <img
+              src={`${apiBase}${source.file_url}`}
+              alt={source.asset_label || source.file_name || refId}
+              loading="lazy"
+            />
+          ) : (
+            <div style={{ height: 120, display: "grid", placeItems: "center", color: "var(--text-tertiary)", background: "var(--bg-subtle)" }}>
+              预览不可用
+            </div>
+          )}
+        </button>
+        <figcaption className="asset-card-info">
+          <strong>{source.asset_label || source.file_name || refId}</strong>
+          <p>{source.summary || source.caption || "没有图片摘要"}</p>
+          <small>{source.page_number ? `p.${source.page_number}` : source.asset_type || ""}</small>
+        </figcaption>
+      </figure>
+
+      <Modal
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        title={source.asset_label || source.file_name || refId}
+        subtitle={source.page_number ? `p.${source.page_number}` : source.asset_type || ""}
+        width="1100px"
+      >
+        <div className="inline-asset-modal-body">
+          {source.file_url ? (
+            <img
+              className="inline-asset-modal-image"
+              src={`${apiBase}${source.file_url}`}
+              alt={`${source.asset_label || source.file_name || refId} 原图`}
+            />
+          ) : (
+            <div className="inline-asset-modal-empty">预览不可用</div>
+          )}
+          <p className="inline-asset-modal-summary">{source.summary || source.caption || "没有图片摘要"}</p>
         </div>
-      )}
-      <figcaption className="asset-card-info">
-        <strong>{source.asset_label || source.file_name || refId}</strong>
-        <p>{source.summary || source.caption || "没有图片摘要"}</p>
-        <small>{source.page_number ? `p.${source.page_number}` : source.asset_type || ""}</small>
-      </figcaption>
-    </figure>
+      </Modal>
+    </>
   );
 }
 

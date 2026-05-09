@@ -12,7 +12,6 @@ from contracts import AgentTask
 from domain import AssetHit
 from domain import ChunkHit
 from domain import DocumentHit
-from domain import ScoredId
 from orchestration.graph_messages import _build_agent_result_message
 from orchestration.graph_messages import _build_tool_message
 from orchestration.graph_messages import _coerce_tool_call_args
@@ -51,6 +50,9 @@ except ImportError:  # pragma: no cover
     StateGraph = None  # type: ignore[assignment]
 
 
+_LOCAL_RETRIEVE_CONTEXTS: dict[str, dict[str, Any]] = {}
+
+
 @dataclass(slots=True)
 class _RetrievalPlanState:
     query_vector: list[float] | None = None
@@ -82,6 +84,211 @@ class _RetrievalIntentPlan:
             "max_steps": self.max_steps,
             "rationale": self.rationale,
         }
+
+
+def _retrieve_context_queue_size() -> int:
+    return max(1, int(_graph_settings().retrieval_context_queue_size))
+
+
+def _retrieve_context_ttl_seconds() -> int:
+    return max(1, int(_graph_settings().redis_retrieval_context_ttl))
+
+
+def _retrieval_agent_max_steps() -> int:
+    return max(2, int(_graph_settings().retrieval_agent_max_steps))
+
+
+def _coerce_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text)
+        return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    return str(content or "").strip()
+
+
+def _needs_fallback_retrieval_conclusion(summary: str) -> bool:
+    normalized = summary.strip()
+    if not normalized:
+        return True
+    return normalized == "Fallback finish from accumulated retrieval tool results."
+
+
+def _build_retrieval_evidence_digest(evidence_pack: Any) -> str:
+    lines: list[str] = []
+    if getattr(evidence_pack, "documents", None):
+        lines.append("Documents:")
+        for document in list(evidence_pack.documents)[:8]:
+            title = str(getattr(document, "title", "") or "").strip()
+            file_name = str(getattr(document, "file_name", "") or "").strip()
+            lines.append(f"- {title or '<untitled>'} ({file_name or 'unknown file'})")
+    if getattr(evidence_pack, "text_chunks", None):
+        lines.append("Retrieved text chunks:")
+        for chunk in list(evidence_pack.text_chunks)[:12]:
+            title = str(getattr(chunk, "document_title", "") or getattr(chunk, "title", "") or "").strip()
+            page = getattr(chunk, "page_number", None)
+            if page is None:
+                page = getattr(chunk, "page", None)
+            text = str(getattr(chunk, "text", "") or "").strip().replace("\n", " ")
+            if len(text) > 320:
+                text = text[:317] + "..."
+            prefix = f"- {title or '<unknown document>'}"
+            if page is not None:
+                prefix += f" p.{page}"
+            lines.append(f"{prefix}: {text}")
+    if getattr(evidence_pack, "assets", None):
+        lines.append("Retrieved assets:")
+        for asset in list(evidence_pack.assets)[:8]:
+            label = str(getattr(asset, "asset_label", "") or "").strip()
+            summary = str(getattr(asset, "summary", "") or getattr(asset, "caption", "") or "").strip()
+            if len(summary) > 200:
+                summary = summary[:197] + "..."
+            lines.append(f"- {label or '<asset>'}: {summary}")
+    return "\n".join(lines).strip()
+
+
+async def _synthesize_fallback_retrieval_conclusion(
+    *,
+    task: AgentTask,
+    intent_plan: _RetrievalIntentPlan,
+    evidence_pack: Any,
+    planner_model: Any,
+) -> str:
+    evidence_digest = _build_retrieval_evidence_digest(evidence_pack)
+    if not evidence_digest:
+        return ""
+    response = await planner_model.ainvoke(
+        [
+            SystemMessage(
+                content=(
+                    "You are closing a retrieval step. Based only on the provided local evidence, "
+                    "write a concise grounded retrieval conclusion that directly answers the retrieval task. "
+                    "Be useful enough with the evidence already in hand. Do not ask for more retrieval, "
+                    "do not emit JSON, and do not mention tool internals."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"Retrieval task query:\n{task.query}\n\n"
+                    f"Retrieval task reason:\n{task.reason}\n\n"
+                    f"Intent plan:\n{json.dumps(intent_plan.to_dict(), ensure_ascii=False)}\n\n"
+                    f"Evidence digest:\n{evidence_digest}\n\n"
+                    "Write the retrieval conclusion in plain text."
+                )
+            ),
+        ]
+    )
+    return _coerce_message_text(getattr(response, "content", ""))
+
+
+def _build_retrieval_completion(
+    *,
+    retrieval_conclusion: str,
+    finish_payload: dict[str, Any],
+    forced_finish: bool,
+    stop_reason: str,
+) -> dict[str, str]:
+    completed = str(finish_payload.get("completed") or retrieval_conclusion or "").strip()
+    pending = str(finish_payload.get("pending") or "").strip()
+    if forced_finish and not pending:
+        pending = (
+            "检索已按轮次上限收口。当前已给出最小准确总结；"
+            "如需更细的逐篇方法、实验结果或结论段落，可继续下钻。"
+        )
+    return {
+        "completed": completed,
+        "pending": pending,
+        "stop_reason": stop_reason,
+    }
+
+
+def _normalize_retrieve_context(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"queue": []}
+    queue = [dict(item) for item in list(value.get("queue", []) or []) if isinstance(item, dict)]
+    return {"queue": queue[-_retrieve_context_queue_size():]}
+
+
+def _retrieve_context_storage_key(*, project_id: str, thread_id: str | None) -> str:
+    return f"{project_id}:{thread_id or 'default-thread'}"
+
+
+def _load_retrieve_context(*, request_config: AgentRequestConfig) -> dict[str, Any]:
+    cache_store = _graph_runtime().cache_store
+    thread_id = str(request_config.thread_id or "").strip()
+    if cache_store is not None and thread_id and hasattr(cache_store, "load_retrieval_context"):
+        return _normalize_retrieve_context(cache_store.load_retrieval_context(request_config.project_id, thread_id))
+    return _normalize_retrieve_context(
+        _LOCAL_RETRIEVE_CONTEXTS.get(
+            _retrieve_context_storage_key(project_id=request_config.project_id, thread_id=request_config.thread_id),
+            {},
+        )
+    )
+
+
+def _save_retrieve_context(*, request_config: AgentRequestConfig, context: dict[str, Any]) -> None:
+    normalized = _normalize_retrieve_context(context)
+    cache_store = _graph_runtime().cache_store
+    thread_id = str(request_config.thread_id or "").strip()
+    if cache_store is not None and thread_id and hasattr(cache_store, "save_retrieval_context"):
+        cache_store.save_retrieval_context(
+            request_config.project_id,
+            thread_id,
+            normalized,
+            ttl_seconds=_retrieve_context_ttl_seconds(),
+        )
+        return
+    _LOCAL_RETRIEVE_CONTEXTS[
+        _retrieve_context_storage_key(project_id=request_config.project_id, thread_id=request_config.thread_id)
+    ] = normalized
+
+
+def _summarize_retrieve_context(context: dict[str, Any]) -> str:
+    queue = [dict(item) for item in list(context.get("queue", []) or []) if isinstance(item, dict)]
+    if not queue:
+        return "No prior retrieval working context."
+    lines = ["Recent retrieval working context (raw queue entries):"]
+    for index, item in enumerate(queue[-_retrieve_context_queue_size():], start=1):
+        query = str(item.get("query") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        intent_plan = dict(item.get("intent_plan", {}) or {})
+        lines.append(
+            f"[{index}] query:\n{query or '<empty>'}\n"
+            f"reason:\n{reason or '<empty>'}\n"
+            f"intent_plan:\n{json.dumps(intent_plan, ensure_ascii=False)}\n"
+            f"result:\n{summary or '<none>'}"
+        )
+    return "\n".join(lines)
+
+
+def _build_updated_retrieve_context(
+    *,
+    previous_context: dict[str, Any],
+    task: AgentTask,
+    result: AgentResult,
+) -> dict[str, Any]:
+    queue = [dict(item) for item in list(previous_context.get("queue", []) or []) if isinstance(item, dict)]
+    retrieval_plan = dict(dict(result.metadata or {}).get("retrieval_plan", {}) or {})
+    queue.append(
+        {
+            "query": task.query,
+            "reason": task.reason,
+            "summary": result.summary,
+            "intent_plan": dict(retrieval_plan.get("intent_plan", {}) or {}),
+            "document_ids": list(retrieval_plan.get("document_ids", []) or []),
+            "chunk_ids": list(retrieval_plan.get("chunk_ids", []) or []),
+            "asset_ids": list(retrieval_plan.get("asset_ids", []) or []),
+        }
+    )
+    return {"queue": queue[-_retrieve_context_queue_size():]}
 
 
 def _graph_settings():
@@ -146,6 +353,22 @@ def _retrieval_tool_schema() -> list[dict[str, object]]:
         {
             "type": "function",
             "function": {
+                "name": "search_chunks_mysql",
+                "description": "Literal full-text-like substring search over `chunks.text`, optionally scoped to multiple document ids. Use this for keyword search across many local documents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {"type": "string"},
+                        "document_ids": {"type": "array", "items": {"type": "string"}},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["keyword"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "fetch_document_chunks_mysql",
                 "description": "Load concrete chunks from MySQL for one document, optionally narrowed by page range.",
                 "parameters": {
@@ -157,6 +380,24 @@ def _retrieval_tool_schema() -> list[dict[str, object]]:
                         "limit": {"type": "integer"},
                     },
                     "required": ["document_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_documents_chunks_mysql",
+                "description": "Batch-load chunks from multiple documents in one call, optionally narrowed by page range. Use this for corpus overviews across many papers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "document_ids": {"type": "array", "items": {"type": "string"}},
+                        "page_from": {"type": "integer"},
+                        "page_to": {"type": "integer"},
+                        "limit_per_document": {"type": "integer"},
+                        "total_limit": {"type": "integer"},
+                    },
+                    "required": ["document_ids"],
                 },
             },
         },
@@ -217,6 +458,8 @@ def _retrieval_tool_schema() -> list[dict[str, object]]:
                         "chunk_ids": {"type": "array", "items": {"type": "string"}},
                         "asset_ids": {"type": "array", "items": {"type": "string"}},
                         "summary": {"type": "string"},
+                        "completed": {"type": "string"},
+                        "pending": {"type": "string"},
                     },
                     "required": ["document_ids", "chunk_ids", "asset_ids", "summary"],
                 },
@@ -246,7 +489,8 @@ def _retrieval_schema_summary() -> str:
         "- `search_documents_mysql`: metadata filtering over `documents`\n"
         "- `search_documents_qdrant`: semantic retrieval over document title/summary vectors\n"
         "- `search_chunks_qdrant`: semantic retrieval over chunk content vectors\n"
-        "- `fetch_document_chunks_mysql` and `fetch_chunks_mysql`: exact chunk row loading from MySQL\n"
+        "- `search_chunks_mysql`: literal full-text-style search over `chunks.text`\n"
+        "- `fetch_document_chunks_mysql`, `fetch_documents_chunks_mysql`, and `fetch_chunks_mysql`: exact chunk row loading from MySQL\n"
         "- `search_assets_qdrant`: semantic retrieval over asset caption/summary vectors\n"
         "- `fetch_assets_mysql`: exact asset row loading from MySQL\n\n"
         "Structural routing policy:\n"
@@ -259,11 +503,14 @@ def _retrieval_schema_summary() -> str:
         "- Avoid low-signal MySQL keywords like `paper`, `research`, `literature`, or `document` for inventory tasks. Those are not structural fields in the database.\n\n"
         "Execution policy:\n"
         "- Database access is read-only. You cannot insert, update, delete, or run arbitrary SQL.\n"
-        "- Use MySQL tools for structured filtering and exact row loading.\n"
+        "- Use MySQL tools for structured filtering, literal metadata/full-text search, and exact row loading.\n"
         "- Use Qdrant tools for semantic candidate retrieval.\n"
         "- Prefer narrowing candidate documents before chunk or asset retrieval when possible.\n"
         "- Prefer exact MySQL fetch after semantic Qdrant recall when the answer needs quotable supporting evidence.\n"
-        "- Call finish_retrieval once you have enough evidence ids."
+        "- Prefer batch retrieval tools when the task asks for corpus-wide or many-document overviews.\n"
+        "- Stop as soon as you can give the smallest accurate answer to the user's actual question.\n"
+        "- Do not keep exploring for hypothetical extra detail the user did not ask for.\n"
+        "- Call finish_retrieval once you have enough evidence ids. In finish_retrieval, put the useful final answer into `summary`, the already-finished portion into `completed`, and any optional unfinished follow-up into `pending`."
     )
 
 
@@ -307,14 +554,14 @@ def _parse_retrieval_intent_plan(raw_output: object) -> _RetrievalIntentPlan:
     need_semantic_search_default = target_level != "document"
     need_chunk_fetch_default = target_level == "chunk"
     need_asset_search_default = target_level == "asset"
-    max_steps_default = 3 if target_level == "document" else 5
+    max_steps_default = 3 if target_level == "document" else _retrieval_agent_max_steps()
     return _RetrievalIntentPlan(
         intent=intent,
         target_level=target_level,
         need_semantic_search=_parse_bool(payload.get("need_semantic_search"), need_semantic_search_default),
         need_chunk_fetch=_parse_bool(payload.get("need_chunk_fetch"), need_chunk_fetch_default),
         need_asset_search=_parse_bool(payload.get("need_asset_search"), need_asset_search_default),
-        max_steps=max(2, min(8, _coerce_positive_int(payload.get("max_steps"), max_steps_default))),
+        max_steps=max(2, min(_retrieval_agent_max_steps(), _coerce_positive_int(payload.get("max_steps"), max_steps_default))),
         rationale=str(payload.get("rationale") or "").strip(),
     )
 
@@ -333,7 +580,12 @@ def _build_retrieval_planning_messages(*, task: AgentTask) -> list[Any]:
                 "- Use `document` for titles/counts/basic metadata.\n"
                 "- Use `chunk` for passages, methods, results, claims, page-level evidence.\n"
                 "- Use `asset` for figures, tables, diagrams, or visual content.\n"
+                "- Broad project-state questions such as what is currently known, what documents are available, or what local evidence exists should still be grounded in the local corpus; choose the lowest level that can answer them.\n"
+                "- Prefer the lowest sufficient retrieval level. Do not escalate from document to chunk or asset unless the user's question actually requires deeper evidence.\n"
+                "- Do not pursue maximal completeness on your own. If document-level synthesis is already enough for a solid answer, stop there and let the user ask for deeper analysis later.\n"
+                "- Choose a plan that can likely finish within a small number of steps. Do not plan open-ended exploration.\n"
                 "- If `target_level` is `document`, default to metadata lookup and avoid semantic search unless clearly needed.\n"
+                "- For corpus-wide overview across many papers, prefer batch tools such as `search_documents_qdrant`, `search_chunks_mysql`, or `fetch_documents_chunks_mysql` over one-document-at-a-time loops.\n"
                 "- Do not include markdown or any text outside the JSON object."
             )
         ),
@@ -352,6 +604,10 @@ def _build_retrieval_execution_instruction(*, plan: _RetrievalIntentPlan) -> str
         "Approved retrieval plan:",
         json.dumps(plan.to_dict(), ensure_ascii=False, indent=2),
         "Follow this plan strictly.",
+        f"You have at most {_retrieval_agent_max_steps()} tool rounds in total.",
+        "Stop as soon as the current evidence is enough for the smallest accurate answer.",
+        "Do not expand scope on your own for speculative completeness.",
+        "If you reach the final round, you must finish with the best grounded summary you have and note any optional unfinished follow-up in `pending`.",
     ]
     if plan.target_level == "document":
         lines.append(
@@ -359,7 +615,7 @@ def _build_retrieval_execution_instruction(*, plan: _RetrievalIntentPlan) -> str
         )
     elif plan.target_level == "chunk":
         lines.append(
-            "You may use document narrowing plus chunk retrieval. Fetch exact chunks only when chunk-level evidence is required."
+            "You may use document narrowing plus chunk retrieval. Prefer `fetch_documents_chunks_mysql` or scoped multi-document chunk search when the task asks for many-document summaries. Fetch exact chunks only when chunk-level evidence is required."
         )
     else:
         lines.append(
@@ -406,6 +662,34 @@ def _serialize_chunk_rows(hits: list[ChunkHit]) -> list[dict[str, object]]:
         }
         for hit in hits
     ]
+
+
+def _select_chunks_from_documents(
+    *,
+    document_ids: list[str],
+    use_case: Any,
+    page_from: object,
+    page_to: object,
+    limit_per_document: int,
+    total_limit: int,
+) -> list[ChunkHit]:
+    selected: list[ChunkHit] = []
+    for document_id in document_ids:
+        chunks = list(use_case.chunk_repository.list_by_document(document_id))
+        per_document_count = 0
+        for chunk in chunks:
+            page = chunk.page
+            if page_from is not None and page is not None and page < int(page_from):
+                continue
+            if page_to is not None and page is not None and page > int(page_to):
+                continue
+            selected.append(ChunkHit(chunk=chunk, score=0.0))
+            per_document_count += 1
+            if per_document_count >= limit_per_document or len(selected) >= total_limit:
+                break
+        if len(selected) >= total_limit:
+            break
+    return selected
 
 
 def _serialize_asset_rows(hits: list[AssetHit]) -> list[dict[str, object]]:
@@ -571,22 +855,62 @@ async def _execute_retrieval_tool(
         plan_state.raw_chunk_hits = use_case._serialize_chunk_rerank_log(raw_hits, hits)
         return {"chunks": _serialize_chunk_rows(hits)}
 
+    if tool_name == "search_chunks_mysql":
+        keyword = str(args.get("keyword") or "").strip().lower()
+        requested_document_ids = [str(item) for item in list(args.get("document_ids", []) or []) if str(item)]
+        limit = _coerce_positive_int(args.get("limit"), request_config.chunk_limit)
+        if requested_document_ids:
+            document_ids = requested_document_ids
+        elif plan_state.document_hits:
+            document_ids = list(plan_state.document_hits.keys())
+        else:
+            document_ids = [document.id for document in list(use_case.document_repository.list_by_project(request_config.project_id))]
+        hits: list[ChunkHit] = []
+        for document_id in document_ids:
+            chunks = list(use_case.chunk_repository.list_by_document(document_id))
+            for chunk in chunks:
+                if keyword and keyword not in chunk.text.lower():
+                    continue
+                hit = ChunkHit(chunk=chunk, score=0.0)
+                hits.append(hit)
+                plan_state.chunk_hits[hit.chunk_id] = hit
+                if len(hits) >= limit:
+                    break
+            if len(hits) >= limit:
+                break
+        return {"chunks": _serialize_chunk_rows(hits)}
+
     if tool_name == "fetch_document_chunks_mysql":
         document_id = str(args.get("document_id") or "").strip()
         page_from = args.get("page_from")
         page_to = args.get("page_to")
         limit = _coerce_positive_int(args.get("limit"), request_config.chunk_limit)
-        chunks = list(use_case.chunk_repository.list_by_document(document_id))
-        selected = []
-        for chunk in chunks:
-            page = chunk.page
-            if page_from is not None and page is not None and page < int(page_from):
-                continue
-            if page_to is not None and page is not None and page > int(page_to):
-                continue
-            selected.append(ChunkHit(chunk=chunk, score=0.0))
-            if len(selected) >= limit:
-                break
+        selected = _select_chunks_from_documents(
+            document_ids=[document_id],
+            use_case=use_case,
+            page_from=page_from,
+            page_to=page_to,
+            limit_per_document=limit,
+            total_limit=limit,
+        )
+        for hit in selected:
+            plan_state.chunk_hits[hit.chunk_id] = hit
+        return {"chunks": _serialize_chunk_rows(selected)}
+
+    if tool_name == "fetch_documents_chunks_mysql":
+        document_ids = [str(item) for item in list(args.get("document_ids", []) or []) if str(item)]
+        page_from = args.get("page_from")
+        page_to = args.get("page_to")
+        limit_per_document = _coerce_positive_int(args.get("limit_per_document"), 4)
+        total_limit = _coerce_positive_int(args.get("total_limit"), request_config.chunk_limit)
+        selected = _select_chunks_from_documents(
+            document_ids=document_ids,
+            use_case=use_case,
+            page_from=page_from,
+            page_to=page_to,
+            limit_per_document=limit_per_document,
+            total_limit=total_limit,
+        )
         for hit in selected:
             plan_state.chunk_hits[hit.chunk_id] = hit
         return {"chunks": _serialize_chunk_rows(selected)}
@@ -687,6 +1011,8 @@ async def _run_retrieve_specialist_with_trace(
 ) -> tuple[AgentResult, list[BaseMessage]]:
     """Execute one retrieval specialist task."""
 
+    normalized_context = _load_retrieve_context(request_config=request_config)
+
     def _cancelled_result(message: str) -> tuple[AgentResult, list[BaseMessage]]:
         return AgentResult(
             task_id=task.task_id,
@@ -727,6 +1053,12 @@ async def _run_retrieve_specialist_with_trace(
     use_case = runtime.retrieve_evidence_use_case
     base_model = runtime.chat_model
     trace_messages: list[BaseMessage] = []
+    trace_messages.append(
+        _build_retrieval_reasoning_message(
+            turn_id=turn_id,
+            content=_summarize_retrieve_context(normalized_context),
+        )
+    )
     raw_intent_plan = await base_model.ainvoke(_build_retrieval_planning_messages(task=task))
     intent_plan = _parse_retrieval_intent_plan(raw_intent_plan)
     planner_model = base_model.bind_tools(_retrieval_tool_schema())
@@ -750,6 +1082,7 @@ async def _run_retrieve_specialist_with_trace(
             content=(
                 f"Task query:\n{task.query}\n\n"
                 f"Reason:\n{task.reason}\n\n"
+                f"Prior retrieval working context:\n{_summarize_retrieve_context(normalized_context)}\n\n"
                 "Plan the retrieval path yourself. You may use MySQL-only lookup, Qdrant-only lookup, "
                 "or a multi-step flow such as document narrowing then chunk retrieval. "
                 "When enough evidence has been gathered, call finish_retrieval."
@@ -758,7 +1091,10 @@ async def _run_retrieve_specialist_with_trace(
     ]
     plan_state = _RetrievalPlanState()
     finish_payload: dict[str, Any] | None = None
-    max_steps = max(2, min(8, _coerce_positive_int(task.constraints.get("max_steps"), intent_plan.max_steps)))
+    max_steps = max(2, min(_retrieval_agent_max_steps(), _coerce_positive_int(task.constraints.get("max_steps"), intent_plan.max_steps)))
+    forced_finish = False
+    stop_reason = "completed"
+    exhausted_steps = True
 
     for _ in range(max_steps):
         if cancel_token is not None and cancel_token.is_cancelled():
@@ -775,6 +1111,7 @@ async def _run_retrieve_specialist_with_trace(
             )
         )
         if not tool_calls:
+            exhausted_steps = False
             break
 
         tool_call = tool_calls[0]
@@ -791,6 +1128,7 @@ async def _run_retrieve_specialist_with_trace(
                     tool_call_id=tool_call_id,
                 )
             )
+            exhausted_steps = False
             break
         trace_messages.append(
             _build_retrieval_tool_call_message(
@@ -825,11 +1163,15 @@ async def _run_retrieve_specialist_with_trace(
         )
 
     if finish_payload is None:
+        forced_finish = True
+        stop_reason = "max_steps_reached" if exhausted_steps else "planner_stopped_without_finish"
         finish_payload = {
             "document_ids": list(plan_state.document_hits.keys())[: request_config.document_limit],
             "chunk_ids": list(plan_state.chunk_hits.keys())[: request_config.chunk_limit],
             "asset_ids": list(plan_state.asset_hits.keys())[: request_config.asset_limit],
             "summary": "Fallback finish from accumulated retrieval tool results.",
+            "completed": "",
+            "pending": "",
         }
 
     evidence_pack = await _build_evidence_pack_from_selection(
@@ -851,13 +1193,46 @@ async def _run_retrieve_specialist_with_trace(
             evidence_pack=evidence_pack,
         )
 
-    result = _build_result(task=task, evidence_pack=evidence_pack, intent_plan=intent_plan)
+    retrieval_conclusion = str(finish_payload.get("summary") or "").strip()
+    if _needs_fallback_retrieval_conclusion(retrieval_conclusion):
+        synthesized_conclusion = await _synthesize_fallback_retrieval_conclusion(
+            task=task,
+            intent_plan=intent_plan,
+            evidence_pack=evidence_pack,
+            planner_model=planner_model,
+        )
+        if synthesized_conclusion:
+            retrieval_conclusion = synthesized_conclusion
+            finish_payload["summary"] = synthesized_conclusion
+            finish_payload.setdefault("completed", synthesized_conclusion)
+            trace_messages.append(
+                _build_retrieval_reasoning_message(
+                    turn_id=turn_id,
+                    content="基于已获取证据完成检索收口：\n" + synthesized_conclusion,
+                )
+            )
+    retrieval_completion = _build_retrieval_completion(
+        retrieval_conclusion=retrieval_conclusion,
+        finish_payload=finish_payload,
+        forced_finish=forced_finish,
+        stop_reason=stop_reason,
+    )
+    result = _build_result(
+        task=task,
+        evidence_pack=evidence_pack,
+        intent_plan=intent_plan,
+        retrieval_conclusion=retrieval_conclusion,
+        retrieval_completion=retrieval_completion,
+    )
     result.metadata["retrieval_plan"] = {
         "intent_plan": intent_plan.to_dict(),
-        "summary": str(finish_payload.get("summary") or ""),
+        "summary": retrieval_conclusion,
         "document_ids": list(finish_payload.get("document_ids", []) or []),
         "chunk_ids": list(finish_payload.get("chunk_ids", []) or []),
         "asset_ids": list(finish_payload.get("asset_ids", []) or []),
+        "completed": retrieval_completion["completed"],
+        "pending": retrieval_completion["pending"],
+        "stop_reason": retrieval_completion["stop_reason"],
     }
     if cache_store is not None:
         cache_store.save_cached_retrieval(
@@ -866,6 +1241,12 @@ async def _run_retrieve_specialist_with_trace(
             result.to_dict(),
             ttl_seconds=_graph_settings().redis_retrieval_cache_ttl,
         )
+    updated_context = _build_updated_retrieve_context(
+        previous_context=normalized_context,
+        task=task,
+        result=result,
+    )
+    _save_retrieve_context(request_config=request_config, context=updated_context)
     return result, trace_messages
 
 
@@ -884,7 +1265,14 @@ async def run_retrieve_specialist(
     return result
 
 
-def _build_result(*, task: AgentTask, evidence_pack: Any, intent_plan: _RetrievalIntentPlan) -> AgentResult:
+def _build_result(
+    *,
+    task: AgentTask,
+    evidence_pack: Any,
+    intent_plan: _RetrievalIntentPlan,
+    retrieval_conclusion: str,
+    retrieval_completion: dict[str, str],
+) -> AgentResult:
     metadata = {
         "citations": build_assistant_metadata(evidence_pack.citations)["citations"],
         "asset_citations": build_asset_citations_metadata(evidence_pack.asset_citations),
@@ -893,27 +1281,37 @@ def _build_result(*, task: AgentTask, evidence_pack: Any, intent_plan: _Retrieva
         "evidence_pack": _serialize_evidence_pack(evidence_pack),
     }
     metadata_only_sufficient = intent_plan.target_level == "document" and bool(evidence_pack.documents)
-    summary = "Found local supporting evidence."
-    if metadata_only_sufficient:
+    summary = retrieval_conclusion or retrieval_completion.get("completed") or "Found local supporting evidence."
+    if not summary and metadata_only_sufficient:
         summary = "Found project document metadata."
-    elif not evidence_pack.citations:
+    elif not summary and not evidence_pack.citations:
         summary = "Local retrieval returned weak evidence."
+    elif metadata_only_sufficient and summary == "Found local supporting evidence.":
+        summary = "Found project document metadata."
     metadata["progress_summary"] = build_progress_summary(
-        done=summary,
+        done=retrieval_completion.get("completed") or summary,
         next="可继续基于引用展开回答或比较证据",
         pending=(
-            "还没有足够强的本地引用证据"
-            if not evidence_pack.citations and not metadata_only_sufficient
-            else "尚未结合外部工具或工作区信息"
+            retrieval_completion.get("pending")
+            or (
+                "还没有足够强的本地引用证据"
+                if not evidence_pack.citations and not metadata_only_sufficient
+                else ""
+            )
         ),
     )
     metadata["metadata_only_sufficient"] = metadata_only_sufficient
+    metadata["retrieval_conclusion"] = retrieval_conclusion
+    metadata["retrieval_completion"] = retrieval_completion
     artifact = AgentArtifact(
         artifact_id=f"artifact_ret_{uuid4().hex[:8]}",
         artifact_type="retrieval_evidence",
         content=(
-            f"Retrieved {len(evidence_pack.documents)} documents, "
-            f"{len(evidence_pack.text_chunks)} chunks, {len(evidence_pack.assets)} assets."
+            retrieval_conclusion
+            or (
+                f"Retrieved {len(evidence_pack.documents)} documents, "
+                f"{len(evidence_pack.text_chunks)} chunks, {len(evidence_pack.assets)} assets."
+            )
         ),
         metadata=metadata,
     )

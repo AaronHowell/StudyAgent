@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 from domain import EvidencePack
+from generation.asset_selection import filter_informative_asset_hits
 from generation.multimodal_context import MultimodalEvidenceContext
 
 
@@ -26,13 +27,14 @@ def build_grounded_answer_prompt(
         )
         for index, hit in enumerate(evidence_pack.text_chunks)
     ]
+    filtered_assets = filter_informative_asset_hits(evidence_pack.assets, question=question)
     asset_lines = [
         (
             f"[A{index + 1}] {hit.caption or hit.summary or hit.asset_label}\n"
             f"source: title=\"{document_title_by_id.get(hit.document_id, hit.document_id)}\" "
             f"page={hit.page_number}"
         )
-        for index, hit in enumerate(evidence_pack.assets)
+        for index, hit in enumerate(filtered_assets)
     ]
     return (
         "You are PaperLab. Answer only from the provided evidence.\n"

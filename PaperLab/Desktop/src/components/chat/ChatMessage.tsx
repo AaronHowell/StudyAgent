@@ -3,7 +3,6 @@ import type { ChatTurn } from "../../usePaperLabStream";
 import { AgentTrace } from "./AgentTrace";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { CitationList } from "./CitationList";
-import { AssetSourceGrid } from "./AssetSourceGrid";
 
 export function ChatMessage({
   turn,
@@ -56,8 +55,6 @@ export function ChatMessage({
           citations={turn.citations ?? []}
           assetCitations={turn.asset_citations ?? []}
         />
-
-        <AssetSourceGrid sources={turn.asset_sources ?? []} />
 
         {turn.web_sources && turn.web_sources.length > 0 ? (
           <div className="citation-row">

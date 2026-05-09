@@ -15,6 +15,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from session_storage.service import SessionStorageService
+from session_storage.models import SessionCheckpoint
 
 
 @dataclass
@@ -154,6 +155,69 @@ class _FakeInterruptGraph(_FakeGraph):
         yield dict(self._state)
 
 
+class _FakeGraphWithHistoryReplay:
+    def __init__(self) -> None:
+        self._baseline_messages = [
+            HumanMessage(content="上一问"),
+            AIMessage(
+                content="上一问的答案",
+                additional_kwargs={
+                    "name": "answer",
+                    "metadata": {
+                        "turn_id": "turn-old",
+                        "artifact_type": "answer",
+                        "summary": {"done": "上一问已答", "next": "", "pending": ""},
+                    },
+                },
+            ),
+        ]
+        self._new_answer = AIMessage(
+            content="新问题的答案",
+            additional_kwargs={
+                "name": "answer",
+                "metadata": {
+                    "turn_id": "turn-new",
+                    "artifact_type": "answer",
+                    "summary": {"done": "新问题已答", "next": "", "pending": ""},
+                },
+            },
+        )
+        self._state = {
+            "messages": [*self._baseline_messages, HumanMessage(content="新问题"), self._new_answer],
+            "active_turn_id": "turn-new",
+            "iteration_count": 1,
+            "max_iterations": 5,
+            "answer_confident": True,
+            "stop_reason": "",
+            "processed_human_message_count": 2,
+            "intervention_count": 0,
+        }
+
+    def update_state(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def get_state(self, *_args: Any, **_kwargs: Any) -> _FakeSnapshot:
+        return _FakeSnapshot(values=self._state, next=())
+
+    async def astream(self, *_args: Any, **_kwargs: Any):
+        yield dict(self._state)
+
+
+class _FakeGraphForRestore:
+    def __init__(self) -> None:
+        self._state: dict[str, Any] = {"messages": []}
+        self.last_update: dict[str, Any] | None = None
+
+    def update_state(self, *_args: Any, **kwargs: Any) -> None:
+        update = dict(kwargs if kwargs else (_args[1] if len(_args) > 1 else {}))
+        merged_messages = [*self._state.get("messages", []), *list(update.get("messages", []) or [])]
+        self._state = {**self._state, **update, "messages": merged_messages}
+        self.last_update = update
+
+    def get_state(self, *_args: Any, **_kwargs: Any) -> _FakeSnapshot:
+        return _FakeSnapshot(values=self._state, next=())
+
+
 def _build_client(storage_root: Path) -> tuple[TestClient, SessionStorageService]:
     chat_module = importlib.import_module("api.chat")
     service = SessionStorageService(root_dir=storage_root)
@@ -252,6 +316,33 @@ def test_chat_stream_emits_interrupt_event_when_graph_pauses() -> None:
             assert "event: interrupt" in response.text
 
 
+def test_chat_stream_does_not_replay_historical_assistant_turns() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, service = _build_client(Path(temp_dir) / "sessions")
+        chat_module = importlib.import_module("api.chat")
+
+        with patch.object(chat_module, "graph", _FakeGraphWithHistoryReplay()), patch.object(
+            chat_module,
+            "get_session_storage",
+            return_value=service,
+        ):
+            response = client.post(
+                "/chat/stream",
+                json={
+                    "project_id": "project-a",
+                    "thread_id": "thread-1",
+                    "input": {"messages": [{"type": "human", "content": "新问题"}]},
+                },
+            )
+
+            assert response.status_code == 200
+            assert "turn-old" not in response.text
+            assert response.text.count("event: assistant_turn_started") == 1
+            assert "turn-new" in response.text
+            assert "上一问的答案" not in response.text
+            assert "新问题的答案" in response.text
+
+
 def test_resume_command_carries_update_messages_as_pending_queue() -> None:
     chat_module = importlib.import_module("api.chat")
     request = chat_module.ChatRunRequest.model_validate(
@@ -272,3 +363,72 @@ def test_resume_command_carries_update_messages_as_pending_queue() -> None:
         "action": "continue_with_guidance",
         "pending_messages": [{"type": "human", "content": "请优先检查方法部分"}],
     }
+
+
+def test_restore_snapshot_hydrates_graph_state_with_full_message_metadata() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        client, service = _build_client(Path(temp_dir) / "sessions")
+        chat_module = importlib.import_module("api.chat")
+        fake_graph = _FakeGraphForRestore()
+
+        service.append_message(
+            project_id="project-a",
+            session_id="thread-1",
+            role="human",
+            message_id="user-1",
+            content="现在我们都知道些什么？",
+            additional_kwargs={},
+            response_metadata={},
+            message_type="human",
+        )
+        answer_metadata = {
+            "turn_id": "turn-1",
+            "artifact_type": "answer",
+            "summary": {"done": "已回答", "next": "", "pending": ""},
+        }
+        service.append_message(
+            project_id="project-a",
+            session_id="thread-1",
+            role="ai",
+            message_id="assistant-1",
+            content="目前有 5 篇论文。",
+            additional_kwargs={"name": "answer", "metadata": answer_metadata},
+            response_metadata=answer_metadata,
+            message_type="ai",
+        )
+        service.write_checkpoint(
+            project_id="project-a",
+            session_id="thread-1",
+            checkpoint=SessionCheckpoint(
+                session_id="thread-1",
+                project_id="project-a",
+                thread_id="thread-1",
+                updated_at="2026-05-09T00:00:00Z",
+                interrupt=None,
+                next_nodes=[],
+                resume_capable=False,
+                active_turn_id="turn-1",
+                iteration_count=1,
+                max_iterations=5,
+                answer_confident=True,
+                stop_reason="",
+                processed_human_message_count=1,
+                intervention_count=0,
+            ),
+        )
+
+        with patch.object(chat_module, "graph", fake_graph), patch.object(
+            chat_module,
+            "get_session_storage",
+            return_value=service,
+        ):
+            response = client.get("/sessions/thread-1/snapshot", params={"project_id": "project-a"})
+
+            assert response.status_code == 200
+            assert fake_graph.last_update is not None
+            restored_messages = list(fake_graph.last_update["messages"])
+            assert len(restored_messages) == 2
+            assert restored_messages[0].type == "human"
+            assert restored_messages[1].type == "ai"
+            assert restored_messages[1].additional_kwargs["metadata"]["artifact_type"] == "answer"
+            assert fake_graph.last_update["processed_human_message_count"] == 1

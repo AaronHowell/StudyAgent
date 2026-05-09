@@ -425,7 +425,6 @@ function ChatTurnBubble({
 
   const traceItems = turn.trace_items ?? [];
   const citations = turn.citations ?? [];
-  const assetCitations = turn.asset_citations ?? [];
   const assetSources = turn.asset_sources ?? [];
   const webSources = turn.web_sources ?? [];
   const toolSources = turn.tool_sources ?? [];
@@ -469,40 +468,6 @@ function ChatTurnBubble({
             <span className="chip citation-chip" key={`${citation.chunk_id}-${citation.locator ?? citation.page ?? "source"}`}>
               {citation.document_title} {citation.locator ?? (citation.page ? `p.${citation.page}` : "")}
             </span>
-          ))}
-        </div>
-      ) : null}
-
-      {assetCitations.length > 0 ? (
-        <div className="citation-row">
-          {assetCitations.map((citation) => (
-            <span className="chip citation-chip" key={`${citation.asset_id}-${citation.locator ?? citation.page ?? "asset"}`}>
-              {citation.label || "图片证据"} {citation.locator ?? (citation.page ? `p.${citation.page}` : "")}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {assetSources.length > 0 ? (
-        <div className="asset-source-grid">
-          {assetSources.map((source) => (
-            <article className="asset-source-card" key={source.asset_id}>
-              {source.file_url ? (
-                <img
-                  className="asset-source-image"
-                  src={`${apiBase}${source.file_url}`}
-                  alt={source.asset_label || source.file_name || "图片证据"}
-                  loading="lazy"
-                />
-              ) : (
-                <div className="asset-source-image empty-image">预览不可用</div>
-              )}
-              <div className="asset-source-copy">
-                <strong>{source.asset_label || source.file_name || "图片证据"}</strong>
-                <p>{source.summary || source.caption || "没有图片摘要"}</p>
-                <small>{source.page_number ? `p.${source.page_number}` : source.asset_type || ""}</small>
-              </div>
-            </article>
           ))}
         </div>
       ) : null}

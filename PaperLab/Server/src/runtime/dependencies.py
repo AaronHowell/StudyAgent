@@ -81,6 +81,7 @@ from usecases import RetrieveEvidenceUseCase
 from integrations import (
     DDGSWebSearchConfig,
     DDGSWebSearchProvider,
+    ChatModelMarkdownMemoryWriteManager,
     ChatModelMarkdownMemorySelector,
     MarkdownMemoryStore,
     Mem0MemoryConfig,
@@ -354,9 +355,11 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
     )
     memory_store = None
     if resolved.memory_enabled and resolved.memory_backend == "markdown":
+        memory_chat_model = _build_memory_chat_model(resolved)
         memory_store = MarkdownMemoryStore(
             root_path=Path(resolved.memory_markdown_root).expanduser(),
-            selector=ChatModelMarkdownMemorySelector(chat_model=_build_memory_chat_model(resolved)),
+            selector=ChatModelMarkdownMemorySelector(chat_model=memory_chat_model),
+            write_manager=ChatModelMarkdownMemoryWriteManager(chat_model=memory_chat_model),
         )
     elif resolved.memory_enabled:
         history_db_path = Path(resolved.memory_history_db_path).expanduser()

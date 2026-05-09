@@ -21,6 +21,7 @@ from domain import (
     ScoredId,
     VectorStore,
 )
+from generation.asset_selection import filter_informative_asset_hits
 from retrieval.evidence_pack import build_evidence_pack
 from retrieval.fusion import fuse_asset_hits, fuse_document_hits
 
@@ -444,17 +445,24 @@ class RetrieveEvidenceUseCase:
         document_ids: list[str],
         top_k: int,
     ) -> list[AssetHit]:
-        """Rerank assets with cross-encoder scores and text-quality filtering."""
+        """Rerank assets with cross-encoder scores and informative-asset filtering."""
 
+        asset_hits = filter_informative_asset_hits(asset_hits, question=query)
+        if not asset_hits:
+            return []
         document_rank = {document_id: index for index, document_id in enumerate(document_ids)}
-        candidates = [hit.caption or hit.summary or hit.asset_type for hit in asset_hits if hit.caption.strip() or hit.summary.strip()]
+        candidates = [
+            self._build_asset_rerank_text(hit)
+            for hit in asset_hits
+            if hit.caption.strip() or hit.summary.strip() or hit.asset_label.strip()
+        ]
         rerank_scores = None
         if self.reranker_provider is not None and candidates:
             rerank_scores = self.reranker_provider.rerank(query, candidates, top_k)
         rescored_hits = []
         rerank_index = 0
         for hit in asset_hits:
-            if not hit.caption.strip() and not hit.summary.strip():
+            if not hit.caption.strip() and not hit.summary.strip() and not hit.asset_label.strip():
                 continue
             score = hit.score + (0.12 / (document_rank.get(hit.document_id, len(document_ids)) + 1))
             if rerank_scores is not None and rerank_index < len(rerank_scores):
@@ -474,6 +482,18 @@ class RetrieveEvidenceUseCase:
             if len(selected_hits) >= top_k:
                 break
         return selected_hits
+
+    @staticmethod
+    def _build_asset_rerank_text(hit: AssetHit) -> str:
+        parts = [
+            f"label: {hit.asset_label}".strip(),
+            f"caption: {hit.caption}".strip(),
+            f"summary: {hit.summary}".strip(),
+            f"asset_type: {hit.asset_type}".strip(),
+            f"page: {hit.page_number}".strip(),
+            f"file_name: {hit.file_name}".strip(),
+        ]
+        return "\n".join(part for part in parts if not part.endswith(":"))
 
     @staticmethod
     def _serialize_scored_ids(hits: list[ScoredId]) -> list[dict[str, object]]:

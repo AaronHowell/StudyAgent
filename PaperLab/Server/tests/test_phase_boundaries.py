@@ -99,6 +99,62 @@ def test_multimodal_message_builder_uses_image_blocks_only_when_enabled() -> Non
     assert any(block.get("type") == "image_url" for block in user_content)
 
 
+def test_multimodal_context_filters_low_value_images() -> None:
+    from domain import AssetHit, Document, DocumentAsset, DocumentHit, DocumentStatus, DocumentType
+    from generation.multimodal_context import build_multimodal_context
+
+    document = Document(
+        id="doc-1",
+        project_id="project-1",
+        path="paper.pdf",
+        file_name="paper.pdf",
+        doc_type=DocumentType.PDF,
+        title="Example Paper",
+        status=DocumentStatus.INDEXED,
+        content_hash="hash",
+    )
+    informative_asset = DocumentAsset(
+        id="asset-figure",
+        document_id="doc-1",
+        page_number=4,
+        file_path="C:/asset-figure.png",
+        file_name="asset-figure.png",
+        asset_label="Figure 2",
+        caption="Figure 2: Tracer workflow overview.",
+        summary="Workflow diagram showing how Tracer tracks patches.",
+        asset_type="workflow_diagram",
+    )
+    low_value_asset = DocumentAsset(
+        id="asset-logo",
+        document_id="doc-1",
+        page_number=1,
+        file_path="C:/asset-logo.png",
+        file_name="page_0001_image_001.png",
+        asset_label="page_0001_image_001.png",
+        caption="",
+        summary="Title and author information from the academic paper.",
+        asset_type="unknown",
+    )
+
+    context = build_multimodal_context(
+        question="Explain the workflow in the figure.",
+        evidence_pack=type(
+            "_FakeEvidencePack",
+            (),
+            {
+                "documents": [DocumentHit(document=document, score=1.0)],
+                "text_chunks": [],
+                "assets": [
+                    AssetHit(asset=low_value_asset, score=0.99),
+                    AssetHit(asset=informative_asset, score=0.95),
+                ],
+            },
+        )(),
+    )
+
+    assert [item.asset_id for item in context.image_items] == ["asset-figure"]
+
+
 def test_reproduce_scaffold_files_are_reserved() -> None:
     root = Path(__file__).resolve().parents[1]
 

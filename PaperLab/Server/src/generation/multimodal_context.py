@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from domain import EvidencePack
+from generation.asset_selection import filter_informative_asset_hits
 
 
 @dataclass(slots=True)
@@ -67,7 +68,12 @@ def build_multimodal_context(
         for index, hit in enumerate(evidence_pack.text_chunks)
     ]
     image_items = []
-    for index, hit in enumerate(evidence_pack.assets[:max_images]):
+    filtered_assets = filter_informative_asset_hits(
+        evidence_pack.assets,
+        question=question,
+        limit=max_images,
+    )
+    for index, hit in enumerate(filtered_assets):
         media_type = hit.asset.media_type or "application/octet-stream"
         image_bytes = None
         if load_image_bytes:

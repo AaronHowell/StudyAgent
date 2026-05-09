@@ -62,6 +62,8 @@ def build_turns_from_messages(messages: list[BaseMessage]) -> list[ChatTurnRespo
             continue
 
         if role == "ai":
+            if artifact_type != "answer":
+                continue
             turn_id = str(metadata.get("turn_id") or raw_id)
             assistant_turn = assistant_by_turn.get(turn_id)
             if assistant_turn is None:
@@ -106,7 +108,10 @@ def build_trace_item(message: BaseMessage, *, index: int) -> ChatTraceItemRespon
     elif artifact_type == "loop_status":
         title = str(metadata.get("phase") or "思考")
     elif artifact_type == "memory_result":
-        title = "记忆检索"
+        title = "长期记忆检索"
+    elif artifact_type == "memory_write_result":
+        kind = "tool_result"
+        title = "长期记忆写入"
     elif artifact_type == "short_term_context":
         title = "短时上下文"
     elif artifact_type == "workspace_tool_result":
