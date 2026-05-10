@@ -72,6 +72,7 @@ class ChatModelMarkdownMemorySelector:
             "Be conservative. Return only memory entries that are directly useful for this user request.\n"
             "Return at most 5 bullets. If nothing is relevant, return exactly: Relevant memory:\\n- none\n"
             "Do not answer the user's request. Do not infer new facts. Do not include unrelated memory.\n\n"
+            "Dynamic memory selection payload:\n"
             f"User request:\n{query}\n\n"
             f"Full memory.md:\n{memory_markdown}"
         )
@@ -104,6 +105,7 @@ class ChatModelMarkdownMemoryWriteManager:
             "Skip if the candidate is already covered by existing memory, too temporary, too generic, or not useful across sessions.\n"
             "Merge if the candidate should update/normalize an existing durable preference or fact.\n"
             "Store if it is a new durable preference, project fact, or reusable research lesson.\n\n"
+            "Dynamic memory write payload:\n"
             f"Memory type:\n{memory_type.value}\n\n"
             f"Write request context:\n{query}\n\n"
             f"Candidate memory:\n{candidate_content}\n\n"

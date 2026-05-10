@@ -591,6 +591,7 @@ def _build_retrieval_planning_messages(*, task: AgentTask) -> list[Any]:
         ),
         HumanMessage(
             content=(
+                "Dynamic retrieval task:\n"
                 f"Task query:\n{task.query}\n\n"
                 f"Reason:\n{task.reason}\n\n"
                 "Think about the task semantics, not just keywords, and choose the minimal retrieval level that can answer it."
@@ -601,8 +602,6 @@ def _build_retrieval_planning_messages(*, task: AgentTask) -> list[Any]:
 
 def _build_retrieval_execution_instruction(*, plan: _RetrievalIntentPlan) -> str:
     lines = [
-        "Approved retrieval plan:",
-        json.dumps(plan.to_dict(), ensure_ascii=False, indent=2),
         "Follow this plan strictly.",
         f"You have at most {_retrieval_agent_max_steps()} tool rounds in total.",
         "Stop as soon as the current evidence is enough for the smallest accurate answer.",
@@ -627,6 +626,12 @@ def _build_retrieval_execution_instruction(*, plan: _RetrievalIntentPlan) -> str
         lines.append("Do not call chunk-fetch tools.")
     if not plan.need_asset_search:
         lines.append("Do not call asset-search tools.")
+    lines.extend(
+        [
+            "Approved retrieval plan:",
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1080,6 +1085,7 @@ async def _run_retrieve_specialist_with_trace(
         ),
         HumanMessage(
             content=(
+                "Dynamic retrieval execution payload:\n"
                 f"Task query:\n{task.query}\n\n"
                 f"Reason:\n{task.reason}\n\n"
                 f"Prior retrieval working context:\n{_summarize_retrieve_context(normalized_context)}\n\n"

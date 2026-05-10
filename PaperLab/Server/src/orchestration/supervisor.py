@@ -1,6 +1,7 @@
 """PaperLab main LangGraph orchestration graph."""
 
 import asyncio
+import math
 from pathlib import Path
 from typing import Annotated
 from typing import Any
@@ -51,6 +52,7 @@ from orchestration.request_config import AgentRequestConfig
 from orchestration.request_config import resolve_agent_request_config
 from orchestration.runtime_access import _runtime
 from runtime import AgentSettings
+from runtime import CancellationToken
 from workers.retriever.agent import build_retrieve_agent_graph
 from workers.retriever.agent import run_retrieve_specialist
 from workers.tool.agent import build_tool_agent_graph
@@ -171,6 +173,222 @@ def _memory_backend() -> Any | None:
 
     runtime = _runtime()
     return getattr(runtime, "memory_backend", getattr(runtime, "memory_store", None))
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    numerator = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+def _token_overlap_score(left: str, right: str) -> float:
+    left_tokens = {token for token in left.casefold().replace("_", " ").split() if token}
+    right_tokens = {token for token in right.casefold().replace("_", " ").split() if token}
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+
+
+def _speculative_query_match(
+    *,
+    runtime: Any,
+    formal_query: str,
+    speculative_query: str,
+    settings: AgentSettings | None = None,
+) -> dict[str, Any]:
+    formal = " ".join(str(formal_query or "").split())
+    speculative = " ".join(str(speculative_query or "").split())
+    if not formal or not speculative:
+        return {"matched": False, "method": "empty", "score": 0.0}
+    if formal.casefold() == speculative.casefold():
+        return {"matched": True, "method": "exact", "score": 1.0}
+
+    resolved_settings = settings or AgentSettings.from_env()
+    use_case = getattr(runtime, "retrieve_evidence_use_case", None)
+    reranker = getattr(use_case, "reranker_provider", None)
+    if reranker is not None:
+        try:
+            scores = reranker.rerank(formal, [speculative], 1)
+            score = float(scores[0]) if scores else 0.0
+            return {
+                "matched": score >= float(resolved_settings.speculative_reranker_threshold),
+                "method": "reranker",
+                "score": score,
+            }
+        except Exception:  # noqa: BLE001
+            pass
+
+    embedding_provider = getattr(use_case, "embedding_provider", None)
+    if embedding_provider is not None:
+        try:
+            vectors = embedding_provider.embed_texts([formal, speculative])
+            score = _cosine_similarity(list(vectors[0]), list(vectors[1])) if len(vectors) >= 2 else 0.0
+            return {
+                "matched": score >= float(resolved_settings.speculative_embedding_threshold),
+                "method": "embedding",
+                "score": score,
+            }
+        except Exception:  # noqa: BLE001
+            pass
+
+    score = _token_overlap_score(formal, speculative)
+    return {"matched": score >= 0.75, "method": "token_overlap", "score": score}
+
+
+def _formal_constraints_fit_speculative(
+    *,
+    formal: dict[str, Any],
+    speculative: dict[str, Any],
+) -> bool:
+    for key in ("document_limit", "chunk_limit", "asset_limit", "top_k"):
+        if key not in formal:
+            continue
+        formal_value = formal.get(key)
+        speculative_value = speculative.get(key)
+        if formal_value is None or speculative_value is None:
+            continue
+        try:
+            if int(speculative_value) < int(formal_value):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _cleanup_speculative_run(runtime: Any, run_id: str) -> None:
+    if hasattr(runtime, "cleanup_speculative_run"):
+        runtime.cleanup_speculative_run(run_id)
+
+
+def _discard_speculative_run(runtime: Any, run_id: str) -> None:
+    if hasattr(runtime, "cancel_speculative_run"):
+        runtime.cancel_speculative_run(run_id)
+    if hasattr(runtime, "mark_speculative_run_for_cleanup"):
+        runtime.mark_speculative_run_for_cleanup(run_id)
+    else:
+        _cleanup_speculative_run(runtime, run_id)
+
+
+async def _run_speculative_memory_task(
+    *,
+    task: AgentTask,
+    request_config: AgentRequestConfig,
+    cancel_token: CancellationToken | None = None,
+) -> AgentResult:
+    if cancel_token is not None and cancel_token.is_cancelled():
+        return AgentResult(
+            task_id=task.task_id,
+            agent_name=task.agent_name,
+            status="cancelled",
+            summary="Speculative memory recall cancelled before execution.",
+            artifacts=[],
+            confidence=0.0,
+            metadata={"cancelled": True, "query": task.query, "memory_hits": []},
+        )
+    memory_service = build_memory_service(
+        backend=_memory_backend(),
+        settings=AgentSettings.from_env(),
+    )
+    limit = int(task.constraints.get("limit") or request_config.memory_limit)
+    recall_result = await asyncio.to_thread(
+        memory_service.recall,
+        role="supervisor",
+        query=task.query,
+        project_id=request_config.project_id,
+        limit=limit,
+    )
+    summary = recall_result.summary or "Relevant memory:\n- none"
+    return AgentResult(
+        task_id=task.task_id,
+        agent_name=task.agent_name,
+        status="completed",
+        summary=summary,
+        artifacts=[],
+        confidence=1.0,
+        metadata={
+            "query": task.query,
+            "reason": task.reason,
+            "memory_hits": [_serialize_memory_item(item) for item in recall_result.hits],
+            "summary": recall_result.summary,
+        },
+    )
+
+
+def _start_speculative_runs(
+    *,
+    runtime: Any,
+    turn_id: str,
+    question: str,
+    request_config: AgentRequestConfig,
+    settings: AgentSettings,
+) -> dict[str, dict[str, Any] | None]:
+    if not settings.speculative_execution_enabled:
+        return {"speculative_memory": None, "speculative_retrieval": None}
+
+    started: dict[str, dict[str, Any] | None] = {"speculative_memory": None, "speculative_retrieval": None}
+    if not hasattr(runtime, "start_speculative_run"):
+        return started
+
+    memory_task = AgentTask(
+        task_id=f"task_mem_spec_{uuid4().hex[:8]}",
+        task_type="memory_recall",
+        agent_name="memory_agent",
+        query=question,
+        reason="Speculative memory recall from raw user input.",
+        constraints={"limit": request_config.memory_limit},
+        metadata={"project_id": request_config.project_id},
+    )
+    memory_record = runtime.start_speculative_run(
+        turn_id=turn_id,
+        task=memory_task,
+        runner=lambda token: _run_speculative_memory_task(
+            task=memory_task,
+            request_config=request_config,
+            cancel_token=token,
+        ),
+    )
+    started["speculative_memory"] = {
+        "run_id": memory_record.run_id,
+        "query": memory_task.query,
+        "reason": memory_task.reason,
+        "constraints": dict(memory_task.constraints),
+    }
+
+    if getattr(runtime, "retrieve_evidence_use_case", None) is not None:
+        retrieve_task = AgentTask(
+            task_id=f"task_ret_spec_{uuid4().hex[:8]}",
+            task_type="local_retrieval",
+            agent_name="retrieval_agent",
+            query=question,
+            reason="Speculative retrieval from raw user input.",
+            constraints={
+                "document_limit": request_config.document_limit,
+                "chunk_limit": request_config.chunk_limit,
+                "asset_limit": request_config.asset_limit,
+            },
+            metadata={"project_id": request_config.project_id, "speculative": True},
+        )
+        retrieve_record = runtime.start_speculative_run(
+            turn_id=turn_id,
+            task=retrieve_task,
+            runner=lambda token: run_retrieve_specialist(
+                task=retrieve_task,
+                request_config=request_config,
+                cancel_token=token,
+            ),
+        )
+        started["speculative_retrieval"] = {
+            "run_id": retrieve_record.run_id,
+            "query": retrieve_task.query,
+            "reason": retrieve_task.reason,
+            "constraints": dict(retrieve_task.constraints),
+        }
+    return started
 
 
 def _memory_write_schema() -> list[dict[str, object]]:
@@ -836,9 +1054,18 @@ async def main_route_node(
     """Turn the latest conversation state into specialist tasks."""
 
     request_config = resolve_agent_request_config(dict(config or {}))
+    settings = AgentSettings.from_env()
+    runtime = _runtime()
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     messages = list(state.get("messages", []))
     question = _latest_human_text(messages)
+    speculative_runs = _start_speculative_runs(
+        runtime=runtime,
+        turn_id=turn_id,
+        question=question,
+        request_config=request_config,
+        settings=settings,
+    )
     short_term_message = _latest_tool_message(messages, "build_short_term_context", turn_id=turn_id)
     memory_message = _latest_tool_message(messages, "search_memory", turn_id=turn_id)
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
@@ -851,7 +1078,7 @@ async def main_route_node(
         interventions=[_message_text(message.content) for message in intervention_messages],
         assessment_guidance=assessment_guidance,
     )
-    bound_model = _runtime().chat_model.bind_tools(_dispatch_schema())
+    bound_model = runtime.chat_model.bind_tools(_dispatch_schema())
     response = await bound_model.ainvoke(
         [
             SystemMessage(content=system_prompt),
@@ -910,6 +1137,13 @@ async def main_route_node(
         )
         task_messages.append(_build_agent_task_message(turn_id=turn_id, task=tool_task))
 
+    if not run_memory and speculative_runs.get("speculative_memory"):
+        _discard_speculative_run(runtime, str(speculative_runs["speculative_memory"].get("run_id") or ""))
+        speculative_runs["speculative_memory"] = None
+    if not run_retrieval and speculative_runs.get("speculative_retrieval"):
+        _discard_speculative_run(runtime, str(speculative_runs["speculative_retrieval"].get("run_id") or ""))
+        speculative_runs["speculative_retrieval"] = None
+
     dispatched_agents = [
         task.agent_name
         for task in (retrieve_task, tool_task)
@@ -937,6 +1171,8 @@ async def main_route_node(
         "memory_reason": memory_reason,
         "retrieve_task": retrieve_task,
         "tool_task": tool_task,
+        "speculative_memory": speculative_runs.get("speculative_memory"),
+        "speculative_retrieval": speculative_runs.get("speculative_retrieval"),
         "retrieve_result": None,
         "tool_result": None,
         "answer_confident": False,
@@ -975,6 +1211,44 @@ async def parallel_specialists_node(
     async def run_retrieval() -> tuple[AgentResult | None, list[BaseMessage]]:
         if retrieve_task is None:
             return None, []
+        speculative_retrieval = dict(state.get("speculative_retrieval", {}) or {})
+        speculative_run_id = str(speculative_retrieval.get("run_id") or "")
+        if speculative_run_id and _formal_constraints_fit_speculative(
+            formal=dict(retrieve_task.constraints or {}),
+            speculative=dict(speculative_retrieval.get("constraints", {}) or {}),
+        ):
+            runtime = _runtime()
+            settings = AgentSettings.from_env()
+            match = _speculative_query_match(
+                runtime=runtime,
+                formal_query=retrieve_task.query,
+                speculative_query=str(speculative_retrieval.get("query") or ""),
+                settings=settings,
+            )
+            if bool(match.get("matched", False)) and hasattr(runtime, "await_speculative_result"):
+                speculative_result = await runtime.await_speculative_result(speculative_run_id)
+                _cleanup_speculative_run(runtime, speculative_run_id)
+                if speculative_result is not None and speculative_result.status == "completed":
+                    metadata = dict(speculative_result.metadata or {})
+                    metadata.update(
+                        {
+                            "speculative_reused": True,
+                            "speculative_run_id": speculative_run_id,
+                            "speculative_query": str(speculative_retrieval.get("query") or ""),
+                            "speculative_match": match,
+                        }
+                    )
+                    reused = AgentResult(
+                        task_id=retrieve_task.task_id,
+                        agent_name=retrieve_task.agent_name,
+                        status=speculative_result.status,
+                        summary=speculative_result.summary,
+                        artifacts=list(speculative_result.artifacts or []),
+                        confidence=speculative_result.confidence,
+                        metadata=metadata,
+                    )
+                    return reused, [_build_agent_result_message(turn_id=turn_id, result=reused)]
+            _discard_speculative_run(runtime, speculative_run_id)
         return await _invoke_specialist_subgraph(
             graph=retrieve_agent_graph,
             task_key="retrieve_task",
@@ -1045,6 +1319,7 @@ async def parallel_specialists_node(
         "messages": output_messages,
         "retrieve_result": retrieval_result.to_dict() if retrieval_result is not None else None,
         "tool_result": tool_result.to_dict() if tool_result is not None else None,
+        "speculative_retrieval": None,
     }
 
 
@@ -1568,11 +1843,46 @@ async def recall_memory_node(
     if not bool(state.get("run_memory", False)):
         return {}
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
+    runtime = _runtime()
+    settings = AgentSettings.from_env()
+    question = str(state.get("memory_query") or _latest_human_text(state.get("messages", [])))
+    speculative_memory = dict(state.get("speculative_memory", {}) or {})
+    speculative_run_id = str(speculative_memory.get("run_id") or "")
+    if speculative_run_id:
+        match = _speculative_query_match(
+            runtime=runtime,
+            formal_query=question,
+            speculative_query=str(speculative_memory.get("query") or ""),
+            settings=settings,
+        )
+        if bool(match.get("matched", False)) and hasattr(runtime, "await_speculative_result"):
+            speculative_result = await runtime.await_speculative_result(speculative_run_id)
+            _cleanup_speculative_run(runtime, speculative_run_id)
+            if speculative_result is not None and speculative_result.status == "completed":
+                result_metadata = dict(speculative_result.metadata or {})
+                message = _build_tool_message(
+                    turn_id=turn_id,
+                    name="search_memory",
+                    content=speculative_result.summary or "Relevant memory:\n- none",
+                    metadata={
+                        "artifact_type": "memory_result",
+                        "query": question,
+                        "memory_hits": list(result_metadata.get("memory_hits", []) or []),
+                        "summary": result_metadata.get("summary", speculative_result.summary),
+                        "reusable": True,
+                        "speculative_reused": True,
+                        "speculative_run_id": speculative_run_id,
+                        "speculative_query": str(speculative_memory.get("query") or ""),
+                        "speculative_match": match,
+                    },
+                )
+                return {"messages": [message], "speculative_memory": None}
+        _discard_speculative_run(runtime, speculative_run_id)
+
     memory_service = build_memory_service(
         backend=_memory_backend(),
-        settings=AgentSettings.from_env(),
+        settings=settings,
     )
-    question = str(state.get("memory_query") or _latest_human_text(state.get("messages", [])))
     recall_result = await asyncio.to_thread(
         memory_service.recall,
         role="supervisor",
@@ -1591,9 +1901,10 @@ async def recall_memory_node(
             "memory_hits": [_serialize_memory_item(item) for item in recall_result.hits],
             "summary": recall_result.summary,
             "reusable": True,
+            "speculative_reused": False,
         },
     )
-    return {"messages": [message]}
+    return {"messages": [message], "speculative_memory": None}
 
 
 def _memory_write_trace_message(
@@ -1715,6 +2026,8 @@ def build_graph():
         memory_reason: str
         retrieve_task: AgentTask | None
         tool_task: AgentTask | None
+        speculative_memory: dict[str, Any] | None
+        speculative_retrieval: dict[str, Any] | None
         retrieve_result: dict[str, Any] | None
         tool_result: dict[str, Any] | None
         processed_human_message_count: int

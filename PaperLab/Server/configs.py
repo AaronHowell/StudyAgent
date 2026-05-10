@@ -144,6 +144,14 @@ class BaseSettings:
             return default
 
     @classmethod
+    def _float_env(cls, paperlab_name: str, legacy_name: str, default: float) -> float:
+        value = cls._env(paperlab_name, legacy_name, default=str(default))
+        try:
+            return float(value)
+        except ValueError:
+            return default
+
+    @classmethod
     def _shared_env_values(cls) -> dict[str, object]:
         return {
             "mysql_host": cls._env("PAPERLAB_MYSQL_HOST", "STUDY_AGENT_MYSQL_HOST", default="127.0.0.1"),
@@ -291,6 +299,9 @@ class AgentSettings(BaseSettings):
     short_term_raw_turns: int = 3
     short_term_summary_turns: int = 4
     retrieval_context_queue_size: int = 8
+    speculative_execution_enabled: bool = True
+    speculative_reranker_threshold: float = 0.65
+    speculative_embedding_threshold: float = 0.82
 
     def __post_init__(self) -> None:
         if not self.memory_llm_base_url:
@@ -412,6 +423,21 @@ class AgentSettings(BaseSettings):
                 "PAPERLAB_RETRIEVAL_CONTEXT_QUEUE_SIZE",
                 "STUDY_AGENT_RETRIEVAL_CONTEXT_QUEUE_SIZE",
                 8,
+            ),
+            speculative_execution_enabled=cls._bool_env(
+                "PAPERLAB_SPECULATIVE_EXECUTION_ENABLED",
+                "STUDY_AGENT_SPECULATIVE_EXECUTION_ENABLED",
+                True,
+            ),
+            speculative_reranker_threshold=cls._float_env(
+                "PAPERLAB_SPECULATIVE_RERANKER_THRESHOLD",
+                "STUDY_AGENT_SPECULATIVE_RERANKER_THRESHOLD",
+                0.65,
+            ),
+            speculative_embedding_threshold=cls._float_env(
+                "PAPERLAB_SPECULATIVE_EMBEDDING_THRESHOLD",
+                "STUDY_AGENT_SPECULATIVE_EMBEDDING_THRESHOLD",
+                0.82,
             ),
         )
 

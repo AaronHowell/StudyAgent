@@ -18,26 +18,13 @@ def build_main_route_messages(
 ) -> tuple[str, str]:
     """Build the coordinator routing prompt."""
 
-    prompt_parts = [
+    instruction_parts = [
         "Decide whether to dispatch memory recall, retrieval, and/or external tool specialists.",
-        f"Question:\n{question}",
     ]
-    if short_term_context:
-        prompt_parts.append(f"Short-term context:\n{short_term_context}")
-    if memory_context:
-        prompt_parts.append(f"Relevant memory:\n{memory_context}")
-    intervention_lines = [item for item in interventions if item]
-    if intervention_lines:
-        prompt_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
-    assessment_lines = [item for item in assessment_guidance if item]
-    if assessment_lines:
-        prompt_parts.append(
-            "Assessment guidance from previous evidence review:\n"
-            + "\n".join(f"- {item}" for item in assessment_lines)
-        )
-    prompt_parts.append(
+    instruction_parts.append(
         "Use each capability according to what kind of information is missing.\n"
         "- Memory recall is for prior user preferences, durable project facts, or earlier conversation conclusions.\n"
+        "- Dispatch retrieval when the missing information should be grounded in the local project corpus.\n"
         "- Retrieval is for project-grounded information that should come from the local paper/document corpus, including document inventory, metadata, passages, figures, tables, and evidence-backed project state.\n"
         "- Tool specialist is for web or MCP-backed external information that is not expected to live in the local project corpus.\n"
         "- If local file tools are enabled later in the answer stage, use them directly instead of dispatching a workspace specialist.\n\n"
@@ -58,9 +45,26 @@ def build_main_route_messages(
         "- Visual assets (figures, tables, diagrams) are retrieved alongside text chunks. "
         "When the question references figures, tables, or visual content, make sure to dispatch a retrieval task."
     )
+    dynamic_parts = [
+        "Dynamic request payload:",
+        f"Question:\n{question}",
+    ]
+    if short_term_context:
+        dynamic_parts.append(f"Short-term context:\n{short_term_context}")
+    if memory_context:
+        dynamic_parts.append(f"Relevant memory:\n{memory_context}")
+    intervention_lines = [item for item in interventions if item]
+    if intervention_lines:
+        dynamic_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    assessment_lines = [item for item in assessment_guidance if item]
+    if assessment_lines:
+        dynamic_parts.append(
+            "Assessment guidance from previous evidence review:\n"
+            + "\n".join(f"- {item}" for item in assessment_lines)
+        )
     return (
         "You are the coordinator for weak speculative multi-agent dispatch.",
-        "\n\n".join(prompt_parts),
+        "\n\n".join([*instruction_parts, *dynamic_parts]),
     )
 
 
@@ -74,18 +78,7 @@ def build_synthesis_prompt(
 ) -> str:
     """Build the final synthesis prompt."""
 
-    synthesis_parts = [f"Question:\n{question}"]
-    if short_term_context:
-        synthesis_parts.append(f"Short-term context:\n{short_term_context}")
-    if memory_context:
-        synthesis_parts.append(f"Relevant memory:\n{memory_context}")
-    intervention_lines = [item for item in interventions if item]
-    if intervention_lines:
-        synthesis_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
-    result_blocks = [payload for payload in specialist_payloads if payload]
-    if result_blocks:
-        synthesis_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
-    synthesis_parts.append(
+    instruction_parts = [
         "Return valid JSON with exactly two top-level keys: "
         "`answer` and `summary`. "
         "`answer` is the user-facing grounded reply. "
@@ -101,8 +94,19 @@ def build_synthesis_prompt(
         "use inline tags like <ref pic>A1</ref pic>, <ref pic>A2</ref pic>, etc. "
         "where the ref_id matches the asset's ref_id from the retrieval results. "
         "This allows the frontend to render the image inline with your answer."
-    )
-    return "\n\n".join(synthesis_parts)
+    ]
+    synthesis_parts = ["Dynamic synthesis payload:", f"Question:\n{question}"]
+    if short_term_context:
+        synthesis_parts.append(f"Short-term context:\n{short_term_context}")
+    if memory_context:
+        synthesis_parts.append(f"Relevant memory:\n{memory_context}")
+    intervention_lines = [item for item in interventions if item]
+    if intervention_lines:
+        synthesis_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    result_blocks = [payload for payload in specialist_payloads if payload]
+    if result_blocks:
+        synthesis_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
+    return "\n\n".join([*instruction_parts, *synthesis_parts])
 
 
 def build_answer_or_continue_prompt(
@@ -116,26 +120,10 @@ def build_answer_or_continue_prompt(
 ) -> str:
     """Build the combined answer-or-loop prompt."""
 
-    prompt_parts = [
+    instruction_parts = [
         "Decide whether the available specialist evidence is enough to answer the user's question.",
-        f"Question:\n{question}",
     ]
-    if short_term_context:
-        prompt_parts.append(f"Short-term context:\n{short_term_context}")
-    if memory_context:
-        prompt_parts.append(f"Relevant memory:\n{memory_context}")
-    intervention_lines = [item for item in interventions if item]
-    if intervention_lines:
-        prompt_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
-    result_blocks = [payload for payload in specialist_payloads if payload]
-    if result_blocks:
-        prompt_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
-    if must_answer:
-        prompt_parts.append(
-            "The loop has reached its stop condition. Provide the best grounded answer possible, "
-            "clearly naming any missing or uncertain evidence."
-        )
-    prompt_parts.append(
+    instruction_parts.append(
         "If evidence is enough, return valid JSON with exactly four top-level keys: "
         "`answer_confident`, `answer`, `summary`, and `next_tasks`; set `answer_confident` to true, "
         "put the user-facing grounded reply in `answer`, put an object with string fields "
@@ -152,7 +140,23 @@ def build_answer_or_continue_prompt(
         "Do not chase perfect completeness by default. If the current evidence is enough for a useful answer, stop and answer. Leave optional deeper investigation as a follow-up the user can request later. "
         "Do not include chain-of-thought or extra keys."
     )
-    return "\n\n".join(prompt_parts)
+    dynamic_parts = ["Dynamic answer-or-loop payload:", f"Question:\n{question}"]
+    if short_term_context:
+        dynamic_parts.append(f"Short-term context:\n{short_term_context}")
+    if memory_context:
+        dynamic_parts.append(f"Relevant memory:\n{memory_context}")
+    intervention_lines = [item for item in interventions if item]
+    if intervention_lines:
+        dynamic_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    result_blocks = [payload for payload in specialist_payloads if payload]
+    if result_blocks:
+        dynamic_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
+    if must_answer:
+        dynamic_parts.append(
+            "The loop has reached its stop condition. Provide the best grounded answer possible, "
+            "clearly naming any missing or uncertain evidence."
+        )
+    return "\n\n".join([*instruction_parts, *dynamic_parts])
 
 
 def build_assessment_prompt(
@@ -167,19 +171,6 @@ def build_assessment_prompt(
 
     assessment_parts = [
         "Decide whether the available specialist evidence is enough to answer the question.",
-        f"Question:\n{question}",
-    ]
-    if short_term_context:
-        assessment_parts.append(f"Short-term context:\n{short_term_context}")
-    if memory_context:
-        assessment_parts.append(f"Relevant memory:\n{memory_context}")
-    intervention_lines = [item for item in interventions if item]
-    if intervention_lines:
-        assessment_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
-    result_blocks = [payload for payload in specialist_payloads if payload]
-    if result_blocks:
-        assessment_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
-    assessment_parts.append(
         "Return valid JSON with exactly two top-level keys: "
         "`answer_confident` and `next_tasks`. "
         "`answer_confident` must be true only when the evidence is sufficient for final synthesis. "
@@ -188,8 +179,19 @@ def build_assessment_prompt(
         "If a specialist already returned a useful completed portion plus only optional deeper follow-up in its progress summary or retrieval completion fields, treat that as sufficient and answer now. "
         "Do not request more evidence just because a deeper per-paper or per-passage exploration might still be possible. "
         "Do not include chain-of-thought or extra keys."
-    )
-    return "\n\n".join(assessment_parts)
+    ]
+    dynamic_parts = ["Dynamic assessment payload:", f"Question:\n{question}"]
+    if short_term_context:
+        dynamic_parts.append(f"Short-term context:\n{short_term_context}")
+    if memory_context:
+        dynamic_parts.append(f"Relevant memory:\n{memory_context}")
+    intervention_lines = [item for item in interventions if item]
+    if intervention_lines:
+        dynamic_parts.append("New user guidance:\n" + "\n".join(f"- {item}" for item in intervention_lines))
+    result_blocks = [payload for payload in specialist_payloads if payload]
+    if result_blocks:
+        dynamic_parts.append("Specialist results:\n" + "\n\n".join(result_blocks))
+    return "\n\n".join([*assessment_parts, *dynamic_parts])
 
 
 def build_tool_agent_selection_messages(*, task_query: str, reason: str) -> tuple[str, str]:
@@ -198,6 +200,7 @@ def build_tool_agent_selection_messages(*, task_query: str, reason: str) -> tupl
     return (
         "Select exactly one tool for ToolAgent.",
         "You are ToolAgent. Choose exactly one tool call that best advances the task.\n\n"
+        "Dynamic tool task:\n"
         f"Task query:\n{task_query}\n\n"
         f"Reason:\n{reason}",
     )
@@ -211,5 +214,5 @@ def build_workspace_agent_selection_messages(*, task_query: str, reason: str) ->
         "Choose exactly one workspace action for the current implementation step. "
         "Use list/read/search for inspection. Use write/run only inside the provided sandbox task. "
         "Use finish only when acceptance criteria are met or a blocker prevents further progress.",
-        f"Task query and implementation state:\n{task_query}\n\nReason:\n{reason}",
+        f"Dynamic workspace task:\nTask query and implementation state:\n{task_query}\n\nReason:\n{reason}",
     )

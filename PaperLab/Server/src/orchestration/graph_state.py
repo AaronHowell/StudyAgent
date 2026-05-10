@@ -38,6 +38,10 @@ class PaperLabGraphState(TypedDict, total=False):
     retrieve_task: AgentTask | None
     # 本轮分发给外部工具专家的任务；未启用工具检索时为 None。
     tool_task: AgentTask | None
+    # 基于原始用户问题提前启动的长期记忆检索任务元数据。
+    speculative_memory: dict[str, Any] | None
+    # 基于原始用户问题提前启动的本地检索专家任务元数据。
+    speculative_retrieval: dict[str, Any] | None
     # 检索专家返回的结构化结果，通常包含摘要、置信度、引用和证据统计。
     retrieve_result: dict[str, Any] | None
     # 工具专家返回的结构化结果，通常包含外部来源、工具调用产物和置信度。
