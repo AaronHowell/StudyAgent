@@ -155,9 +155,9 @@ export function ChatPanel({
   }
 
   async function openThread(thread: ChatThreadSummary) {
+    if (thread.id === stream.threadId) return;
     try {
       await stream.restoreSession({ projectId: thread.projectId, threadId: thread.id });
-      touchThread(thread.id);
     } catch {
       stream.resetThread(thread.id);
     }

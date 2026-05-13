@@ -30,6 +30,30 @@ class OutputSummaryTest(unittest.TestCase):
         self.assertEqual(answer, "普通文本回复")
         self.assertEqual(summary, build_progress_summary(done="已生成当前回复", next="", pending="尚未提供结构化步骤摘要"))
 
+    def test_parse_structured_assistant_output_extracts_json_from_code_fence(self) -> None:
+        answer, summary = parse_structured_assistant_output(
+            """```json
+            {
+              "answer": "这是最终答案。",
+              "summary": {
+                "done": "已完成回答",
+                "next": "可继续深入方法细节",
+                "pending": "尚未展开实验分析"
+              }
+            }
+            ```"""
+        )
+
+        self.assertEqual(answer, "这是最终答案。")
+        self.assertEqual(
+            summary,
+            build_progress_summary(
+                done="已完成回答",
+                next="可继续深入方法细节",
+                pending="尚未展开实验分析",
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

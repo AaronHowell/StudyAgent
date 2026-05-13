@@ -131,20 +131,13 @@ def result_status(result: dict[str, Any]) -> str:
     return str(result.get("status") or "")
 
 
-def result_confidence(result: dict[str, Any]) -> float:
-    try:
-        return float(result.get("confidence", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def dispatch_schema() -> list[dict[str, object]]:
     return [
         {
             "type": "function",
             "function": {
                 "name": "dispatch_specialists",
-                "description": "Choose whether to launch memory recall, retrieval, and/or external tool specialist tasks.",
+                "description": "Choose whether to launch memory recall and/or retrieval specialist tasks.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -154,9 +147,6 @@ def dispatch_schema() -> list[dict[str, object]]:
                         "run_retrieval": {"type": "boolean"},
                         "retrieval_query": {"type": "string"},
                         "retrieval_reason": {"type": "string"},
-                        "run_tool": {"type": "boolean"},
-                        "tool_query": {"type": "string"},
-                        "tool_reason": {"type": "string"},
                     },
                     "required": [
                         "run_memory",
@@ -165,9 +155,6 @@ def dispatch_schema() -> list[dict[str, object]]:
                         "run_retrieval",
                         "retrieval_query",
                         "retrieval_reason",
-                        "run_tool",
-                        "tool_query",
-                        "tool_reason",
                     ],
                 },
             },
@@ -200,13 +187,17 @@ def build_assistant_message(
     content: str,
     metadata: dict[str, object],
     raw_id: str | None = None,
+    additional_kwargs: dict[str, Any] | None = None,
+    response_metadata: dict[str, Any] | None = None,
 ) -> AIMessage:
     message_metadata = {"turn_id": turn_id, **metadata}
+    assistant_kwargs = {"name": "answer", "metadata": message_metadata, **dict(additional_kwargs or {})}
+    assistant_response_metadata = {**dict(response_metadata or {}), **message_metadata}
     return AIMessage(
         id=raw_id or f"answer_{turn_id}_{uuid4().hex[:8]}",
         content=content,
-        additional_kwargs={"name": "answer", "metadata": message_metadata},
-        response_metadata=message_metadata,
+        additional_kwargs=assistant_kwargs,
+        response_metadata=assistant_response_metadata,
     )
 
 
@@ -332,10 +323,6 @@ def _result_status(result: dict[str, Any]) -> str:
     return result_status(result)
 
 
-def _result_confidence(result: dict[str, Any]) -> float:
-    return result_confidence(result)
-
-
 def _dispatch_schema() -> list[dict[str, object]]:
     return dispatch_schema()
 
@@ -363,12 +350,16 @@ def _build_assistant_message(
     content: str,
     metadata: dict[str, object],
     raw_id: str | None = None,
+    additional_kwargs: dict[str, Any] | None = None,
+    response_metadata: dict[str, Any] | None = None,
 ) -> AIMessage:
     return build_assistant_message(
         turn_id=turn_id,
         content=content,
         metadata=metadata,
         raw_id=raw_id,
+        additional_kwargs=additional_kwargs,
+        response_metadata=response_metadata,
     )
 
 

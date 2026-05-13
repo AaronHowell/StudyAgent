@@ -8,6 +8,7 @@ export type ChatTraceItem = {
   text: string;
   status: string;
   created_at?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type MessageSummary = {
@@ -50,6 +51,7 @@ export type SourceRecord = {
   title?: string;
   url?: string;
   tool_name?: string;
+  kind?: string;
 };
 
 export type ChatTurn = {
@@ -88,6 +90,7 @@ type SubmitOptions = {
   projectId: string;
   threadId?: string;
   toolsEnabled?: boolean;
+  toolSettings?: Record<string, unknown>;
   command?: {
     update?: {
       messages?: Array<{ type: string; content: string }>;
@@ -259,23 +262,31 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
 
   const restoreSession = useCallback(
     async ({ projectId, threadId: nextThreadId }: LoadStateOptions) => {
-      stop();
+      // Abort any in-flight submit, but don't reset thread state
+      abortRef.current?.abort();
+      abortRef.current = null;
+      submitInFlightRef.current = false;
       setError(null);
+      setIsLoading(true);
 
-      const response = await fetch(
-        `${apiBaseUrl}/sessions/${encodeURIComponent(nextThreadId)}/snapshot?project_id=${encodeURIComponent(projectId)}`,
-      );
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/sessions/${encodeURIComponent(nextThreadId)}/snapshot?project_id=${encodeURIComponent(projectId)}`,
+        );
 
-      if (!response.ok) {
-        throw new Error(await response.text());
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        const payload = (await response.json()) as SnapshotPayload<TInterrupt>;
+        setThreadId(nextThreadId);
+        setTurns(payload.turns ?? []);
+        setInterrupt(payload.interrupt ?? null);
+      } finally {
+        setIsLoading(false);
       }
-
-      const payload = (await response.json()) as SnapshotPayload<TInterrupt>;
-      setThreadId(nextThreadId);
-      setTurns(payload.turns ?? []);
-      setInterrupt(payload.interrupt ?? null);
     },
-    [apiBaseUrl, stop],
+    [apiBaseUrl],
   );
 
   const listSessions = useCallback(
@@ -353,6 +364,7 @@ export function usePaperLabStream<TInterrupt extends Record<string, unknown>>({
             input,
             command: options.command,
             tools_enabled: Boolean(options.toolsEnabled),
+            tool_settings: options.toolSettings ?? null,
           }),
           signal: controller.signal,
         });

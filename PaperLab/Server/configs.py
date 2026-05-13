@@ -269,6 +269,12 @@ class AgentSettings(BaseSettings):
     memory_llm_base_url: str = ""
     memory_llm_api_key: str = ""
     memory_llm_model: str = ""
+    llm_thinking_enabled: bool = False
+    worker_llm_base_url: str = ""
+    worker_llm_api_key: str = ""
+    worker_llm_model: str = ""
+    worker_llm_thinking_enabled: bool = False
+    memory_llm_thinking_enabled: bool = False
     memory_embedder_provider: str = "lmstudio"
     web_search_enabled: bool = True
     web_search_result_limit: int = 5
@@ -310,6 +316,12 @@ class AgentSettings(BaseSettings):
             self.memory_llm_api_key = self.llm_api_key
         if not self.memory_llm_model:
             self.memory_llm_model = self.llm_model
+        if not self.worker_llm_base_url:
+            self.worker_llm_base_url = self.llm_base_url
+        if not self.worker_llm_api_key:
+            self.worker_llm_api_key = self.llm_api_key
+        if not self.worker_llm_model:
+            self.worker_llm_model = self.llm_model
 
     @classmethod
     def _json_env(cls, paperlab_name: str, legacy_name: str) -> list[dict[str, object]] | None:
@@ -366,6 +378,20 @@ class AgentSettings(BaseSettings):
             memory_llm_base_url=cls._env("PAPERLAB_MEMORY_LLM_BASE_URL", "STUDY_AGENT_MEMORY_LLM_BASE_URL", default=""),
             memory_llm_api_key=cls._env("PAPERLAB_MEMORY_LLM_API_KEY", "STUDY_AGENT_MEMORY_LLM_API_KEY", default=""),
             memory_llm_model=cls._env("PAPERLAB_MEMORY_LLM_MODEL", "STUDY_AGENT_MEMORY_LLM_MODEL", default=""),
+            llm_thinking_enabled=cls._bool_env("PAPERLAB_LLM_THINKING_ENABLED", "STUDY_AGENT_LLM_THINKING_ENABLED", False),
+            worker_llm_base_url=cls._env("PAPERLAB_WORKER_LLM_BASE_URL", "STUDY_AGENT_WORKER_LLM_BASE_URL", default=""),
+            worker_llm_api_key=cls._env("PAPERLAB_WORKER_LLM_API_KEY", "STUDY_AGENT_WORKER_LLM_API_KEY", default=""),
+            worker_llm_model=cls._env("PAPERLAB_WORKER_LLM_MODEL", "STUDY_AGENT_WORKER_LLM_MODEL", default=""),
+            worker_llm_thinking_enabled=cls._bool_env(
+                "PAPERLAB_WORKER_LLM_THINKING_ENABLED",
+                "STUDY_AGENT_WORKER_LLM_THINKING_ENABLED",
+                False,
+            ),
+            memory_llm_thinking_enabled=cls._bool_env(
+                "PAPERLAB_MEMORY_LLM_THINKING_ENABLED",
+                "STUDY_AGENT_MEMORY_LLM_THINKING_ENABLED",
+                False,
+            ),
             memory_embedder_provider=cls._env(
                 "PAPERLAB_MEMORY_EMBEDDER_PROVIDER",
                 "STUDY_AGENT_MEMORY_EMBEDDER_PROVIDER",

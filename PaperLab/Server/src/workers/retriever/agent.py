@@ -1056,7 +1056,7 @@ async def _run_retrieve_specialist_with_trace(
 
     runtime = _graph_runtime()
     use_case = runtime.retrieve_evidence_use_case
-    base_model = runtime.chat_model
+    base_model = runtime.worker_model
     trace_messages: list[BaseMessage] = []
     trace_messages.append(
         _build_retrieval_reasoning_message(
@@ -1110,10 +1110,17 @@ async def _run_retrieve_specialist_with_trace(
         planner_content = str(getattr(planner_response, "content", "") or "").strip()
         if planner_content:
             trace_messages.append(_build_retrieval_reasoning_message(turn_id=turn_id, content=planner_content))
+        extra_kwargs = dict(getattr(planner_response, "additional_kwargs", {}) or {})
+        resp_meta = dict(getattr(planner_response, "response_metadata", {}) or {})
+        reasoning = getattr(planner_response, "reasoning_content", None) or extra_kwargs.get("reasoning_content")
+        if reasoning:
+            resp_meta["reasoning_content"] = reasoning
         tool_messages.append(
             AIMessage(
                 content=str(getattr(planner_response, "content", "") or ""),
                 tool_calls=_normalize_langchain_tool_calls(tool_calls),
+                additional_kwargs=extra_kwargs,
+                response_metadata=resp_meta,
             )
         )
         if not tool_calls:

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
-import { BookOpen, MessageSquare, AlertCircle } from "lucide-react";
-import { buildDocumentFileUrl } from "./PaperLabChatPanel";
+import { BookOpen, MessageSquare, AlertCircle, Wrench } from "lucide-react";
+import { buildDocumentFileUrl, PaperLabChatPanel } from "./PaperLabChatPanel";
 import type { DocumentImage, ScannedDocument } from "./types";
 import { useDocuments } from "./hooks/useDocuments";
 import { usePreferences } from "./hooks/usePreferences";
@@ -12,7 +12,7 @@ import { GalleryModal } from "./components/common/GalleryModal";
 
 const apiBase = import.meta.env.VITE_PAPERLAB_API_BASE_URL ?? "http://127.0.0.1:8000";
 
-type WorkspaceView = "paper" | "ai";
+type WorkspaceView = "paper" | "ai" | "solo";
 type PaperView = "library" | "reader";
 type GalleryImage = DocumentImage & { preview_url: string };
 
@@ -195,6 +195,15 @@ function App() {
               <MessageSquare size={14} />
               AI 对话
             </button>
+            <button
+              className={`workspace-tab ${workspace === "solo" ? "active" : ""}`}
+              role="tab"
+              aria-selected={workspace === "solo"}
+              onClick={() => setWorkspace("solo")}
+            >
+              <Wrench size={14} />
+              AI SOLO
+            </button>
           </div>
         </div>
 
@@ -253,7 +262,7 @@ function App() {
               onOpenGallery={() => selectedDocument && void openGallery(selectedDocument)}
             />
           )
-        ) : (
+        ) : workspace === "ai" ? (
           /* AI workspace */
           <div className="ai-workspace">
             <ChatPanel
@@ -265,6 +274,22 @@ function App() {
                 selectedDocument
                   ? `当前选中论文：${selectedDocument.title} — 可直接在对话中要求复现`
                   : "未锁定论文 — 选择论文后可在对话中要求复现"
+              }
+              showThreadSidebar
+            />
+          </div>
+        ) : (
+          <div className="ai-workspace">
+            <PaperLabChatPanel
+              projectId={projectId}
+              rootPath={rootPath}
+              title="AI SOLO"
+              description="使用 Tool Agent、文件工具、Shell 与 MCP CodingAgent 执行独立任务，并可视化工具筛选与调用过程。"
+              placeholder="输入任务，使用 + 控制网络搜索、文件权限、MCP 与 Shell 授权"
+              contextLabel={
+                selectedDocument
+                  ? `当前项目：${projectId} · 当前论文：${selectedDocument.title} · 可继续已有对话并执行工具任务`
+                  : `当前项目：${projectId} · 可继续已有对话并执行 Tool Agent、文件操作与 MCP CodingAgent 任务`
               }
               showThreadSidebar
             />

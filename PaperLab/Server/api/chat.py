@@ -56,14 +56,22 @@ def get_session_storage() -> SessionStorageService:
     return SessionStorageService(root_dir=Path(settings.session_storage_dir).expanduser())
 
 
-def _thread_config(*, project_id: str, thread_id: str, tools_enabled: bool = False) -> dict[str, Any]:
+def _thread_config(
+    *,
+    project_id: str,
+    thread_id: str,
+    tools_enabled: bool = False,
+    tool_settings: dict[str, object] | None = None,
+) -> dict[str, Any]:
     resolved_project_id = str(project_id or "").strip() or DEFAULT_PROJECT_ID
     resolved_thread_id = str(thread_id or "").strip() or DEFAULT_THREAD_ID
+    normalized_settings = dict(tool_settings or {})
     return {
         "configurable": {
             "project_id": resolved_project_id,
             "thread_id": resolved_thread_id,
             "tools_enabled": tools_enabled,
+            **normalized_settings,
         }
     }
 
@@ -473,6 +481,7 @@ async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
         project_id=request.project_id,
         thread_id=request.thread_id,
         tools_enabled=request.tools_enabled,
+        tool_settings=request.tool_settings,
     )
     graph_input = _coerce_graph_input(request)
 
@@ -568,6 +577,11 @@ async def stream_chat_run(request: ChatRunRequest) -> StreamingResponse:
                 yield _sse_frame("interrupt", payload.interrupt.model_dump())
         except Exception as exc:  # noqa: BLE001
             logger.exception("Chat stream failed.")
+            try:
+                from orchestration.debug_logger import log_error
+                log_error(turn_id="", stage="chat_stream", error=str(exc))
+            except Exception:
+                pass
             yield _sse_frame("error", {"message": str(exc)})
 
     return StreamingResponse(

@@ -1,7 +1,11 @@
 """PaperLab main LangGraph orchestration graph."""
 
 import asyncio
+import json
 import math
+import warnings
+
+warnings.filterwarnings("ignore", message=".*Deserializing unregistered type.*TaskEnvelope.*")
 from pathlib import Path
 from typing import Annotated
 from typing import Any
@@ -42,13 +46,23 @@ from orchestration.graph_messages import (
 )
 from orchestration.guidance_queue import pop_guidance_messages
 from orchestration.graph_serialization import (
-    build_assistant_metadata,
-    _serialize_evidence_pack,
     _serialize_memory_item,
 )
 from orchestration.output_summary import parse_structured_assistant_output
 from orchestration.graph_state import PaperLabGraphState
+from orchestration.debug_logger import (
+    log_assess_decision,
+    log_error,
+    log_llm_call,
+    log_routing_decision,
+    log_specialist_dispatch,
+    log_specialist_result,
+    log_synthesis,
+    log_tool_call,
+    log_tool_result,
+)
 from orchestration.request_config import AgentRequestConfig
+from orchestration.request_config import _coerce_positive_int
 from orchestration.request_config import resolve_agent_request_config
 from orchestration.runtime_access import _runtime
 from runtime import AgentSettings
@@ -58,6 +72,7 @@ from workers.retriever.agent import run_retrieve_specialist
 from workers.tool.agent import build_tool_agent_graph
 from workers.tool.agent import run_tool_specialist
 from workspace.tools import build_tool_approval_request
+from workspace.tools import build_workspace_policy
 from workspace.tools import execute_workspace_tool
 
 try:
@@ -103,9 +118,7 @@ class LoopInterruptPayload(TypedDict, total=False):
     question: str
     pending_user_messages: int
     retrieve_task: dict[str, Any] | None
-    tool_task: dict[str, Any] | None
     retrieve_result_status: str
-    tool_result_status: str
 
 
 def _checkpoint_redis_url(settings: AgentSettings) -> str:
@@ -127,10 +140,16 @@ def _checkpoint_ttl_config(settings: AgentSettings) -> dict[str, Any] | None:
 
 def _build_checkpointer(settings: AgentSettings | None = None) -> Any | None:
     resolved = settings or AgentSettings.from_env()
+    _allowed_msgpack = [("contracts.task_envelope", "TaskEnvelope")]
     if not resolved.checkpoint_redis_enabled:
         if InMemorySaver is None:
             return None
-        return InMemorySaver()
+        try:
+            from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+            serde = JsonPlusSerializer(allowed_msgpack_modules=_allowed_msgpack)
+        except Exception:
+            serde = None
+        return InMemorySaver(serde=serde)
     if RedisSaver is None:
         raise ImportError(
             "langgraph-checkpoint-redis is required when PAPERLAB_CHECKPOINT_REDIS_ENABLED=true."
@@ -154,7 +173,6 @@ def _build_loop_interrupt_payload(
     human_messages = _human_messages(messages)
     processed_count = int(state.get("processed_human_message_count", 0) or 0)
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
-    tool_result = dict(state.get("tool_result", {}) or {})
     return {
         "phase": phase,
         "turn_id": str(state.get("active_turn_id") or ""),
@@ -162,9 +180,7 @@ def _build_loop_interrupt_payload(
         "question": _message_text(_latest_human_text(messages)) if messages else "",
         "pending_user_messages": max(0, len(human_messages) - processed_count),
         "retrieve_task": state.get("retrieve_task").to_dict() if state.get("retrieve_task") else None,
-        "tool_task": state.get("tool_task").to_dict() if state.get("tool_task") else None,
         "retrieve_result_status": _result_status(retrieve_result),
-        "tool_result_status": _result_status(tool_result),
     }
 
 
@@ -422,100 +438,171 @@ def _answer_or_loop_schema() -> list[dict[str, object]]:
     ]
 
 
-def _main_workspace_tool_schema() -> list[dict[str, object]]:
-    return [
+def _main_workspace_tool_schema(request_config: AgentRequestConfig) -> list[dict[str, object]]:
+    schemas: list[dict[str, object]] = [
         {
             "type": "function",
             "function": {
-                "name": "detect_platform",
-                "description": "Detect the current server operating system and available file search tools.",
+                "name": "get_current_time",
+                "description": "获取当前日期和时间，包括本地时间、UTC时间、星期和时区信息。",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "List files or directories under the workspace root.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "find_files",
-                "description": "Find files by pattern under the workspace root.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"pattern": {"type": "string"}, "limit": {"type": "integer"}},
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_text",
-                "description": "Search text in workspace files.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}},
-                    "required": ["pattern"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read one UTF-8 workspace file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}, "max_chars": {"type": "integer"}},
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "mkdir",
-                "description": "Create a directory under the workspace root. Requires user approval.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write a UTF-8 file under the workspace root. Requires user approval.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                    "required": ["path", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "Run a single command in the workspace root. Requires user approval.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer"}},
-                    "required": ["command"],
-                },
-            },
-        },
     ]
+    if request_config.allow_file_read:
+        schemas.extend(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "detect_platform",
+                        "description": "Detect the current server operating system and available file search tools.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_files",
+                        "description": "List files or directories under the workspace root.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "find_files",
+                        "description": "Find files by pattern under the workspace root.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"pattern": {"type": "string"}, "limit": {"type": "integer"}},
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_text",
+                        "description": "Search text in workspace files.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}},
+                            "required": ["pattern"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "description": "Read one UTF-8 workspace file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}, "max_chars": {"type": "integer"}},
+                            "required": ["path"],
+                        },
+                    },
+                },
+            ]
+        )
+    if request_config.allow_file_write:
+        schemas.extend(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "description": "Write a UTF-8 file under the workspace root. Requires user approval.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                            "required": ["path", "content"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "delete_file",
+                        "description": "Delete one file or directory under the workspace root. Requires user approval.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "description": "Run one allowed command with cwd fixed to the workspace root. Requires user approval.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer"}},
+                            "required": ["command"],
+                        },
+                    },
+                },
+            ]
+        )
+    return schemas
+
+
+def _tool_search_virtual_schema() -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "tool_search",
+            "description": "Search for additional tools when none of the currently available tools fit the task.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["query", "reason"],
+            },
+        },
+    }
+
+
+def _external_tool_schemas_from_result(
+    tool_result: dict[str, Any],
+    *,
+    request_config: AgentRequestConfig,
+) -> list[dict[str, object]]:
+    if not (request_config.allow_web_search or request_config.allow_mcp):
+        return []
+    metadata = dict(tool_result.get("metadata", {}) or {})
+    recommended = list(metadata.get("recommended_tools", []) or [])
+    schemas: list[dict[str, object]] = []
+    for item in recommended:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        kind = str(item.get("kind") or "").strip()
+        if kind == "web" and not request_config.allow_web_search:
+            continue
+        if kind == "mcp" and not request_config.allow_mcp:
+            continue
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(item.get("description") or ""),
+                    "parameters": dict(item.get("input_schema", {}) or {"type": "object", "properties": {}}),
+                },
+            }
+        )
+    return schemas
 
 
 def _memory_write_tool_schema() -> dict[str, object]:
@@ -620,15 +707,27 @@ def _coerce_tool_approval_decision(value: Any) -> dict[str, object]:
     return {"action": action}
 
 
-def _execute_main_workspace_tool(tool_call: dict[str, Any]) -> dict[str, object]:
+def _execute_main_workspace_tool(
+    tool_call: dict[str, Any],
+    *,
+    request_config: AgentRequestConfig,
+    skip_approval: bool = False,
+) -> dict[str, object]:
     tool_name = str(tool_call.get("name") or "")
     args = _coerce_tool_call_args(tool_call)
+    workspace_root = Path(request_config.workspace_root or Path.cwd())
+    policy = build_workspace_policy(
+        root=workspace_root,
+        allow_file_read=request_config.allow_file_read,
+        allow_file_write=request_config.allow_file_write,
+        allow_shell=request_config.allow_shell,
+    )
     approval = build_tool_approval_request(
         tool_call_id=str(tool_call.get("id") or f"main_tool_{uuid4().hex[:8]}"),
         tool_name=tool_name,
         args=args,
     )
-    if approval is not None and interrupt is not None:
+    if approval is not None and interrupt is not None and not skip_approval:
         resume_value = interrupt(
             {
                 "type": "tool_approval",
@@ -647,12 +746,101 @@ def _execute_main_workspace_tool(tool_call: dict[str, Any]) -> dict[str, object]
             }
         if isinstance(decision.get("args"), dict):
             args = dict(decision["args"])
-    result = execute_workspace_tool(root=Path.cwd(), tool_name=tool_name, args=args)
+    result = execute_workspace_tool(
+        root=workspace_root,
+        tool_name=tool_name,
+        args=args,
+        policy=policy,
+    )
     return {
         "tool_name": tool_name,
         "args": args,
         "status": "completed",
         **result,
+    }
+
+
+async def _execute_selected_external_tool(
+    tool_call: dict[str, Any],
+    *,
+    request_config: AgentRequestConfig,
+) -> dict[str, object]:
+    tool_name = str(tool_call.get("name") or "")
+    args = _coerce_tool_call_args(tool_call)
+    if tool_name == "web_search":
+        if not request_config.allow_web_search:
+            raise ValueError("Tool 'web_search' is not enabled.")
+        web_provider = _runtime().web_search_provider
+        if web_provider is None:
+            raise ValueError("Web search provider is unavailable.")
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ValueError("web_search requires a query.")
+        top_k = _coerce_positive_int(args.get("top_k"), AgentSettings.from_env().web_search_result_limit)
+        results = await asyncio.to_thread(web_provider.search, query, top_k)
+        web_sources = []
+        for item in results:
+            metadata = dict(getattr(item, "metadata", {}) or {})
+            web_sources.append(
+                {
+                    "title": str(metadata.get("title") or ""),
+                    "url": str(metadata.get("url") or ""),
+                    "snippet": str(metadata.get("snippet") or ""),
+                }
+            )
+        return {
+            "tool_name": tool_name,
+            "args": args,
+            "status": "completed",
+            "summary": f"web_search returned {len(web_sources)} result(s).",
+            "content": json.dumps(web_sources, ensure_ascii=False, indent=2),
+            "web_sources": web_sources,
+        }
+    if tool_name == "url_fetch":
+        if not request_config.allow_web_search:
+            raise ValueError("Tool 'url_fetch' is not enabled.")
+        web_provider = _runtime().web_search_provider
+        if web_provider is None:
+            raise ValueError("Web search provider is unavailable.")
+        url = str(args.get("url") or "").strip()
+        if not url:
+            raise ValueError("url_fetch requires a url.")
+        result = await asyncio.to_thread(web_provider.fetch, url)
+        metadata = dict(getattr(result, "metadata", {}) or {})
+        page = {
+            "title": str(metadata.get("title") or ""),
+            "url": str(metadata.get("url") or url),
+            "excerpt": str(metadata.get("excerpt") or ""),
+        }
+        return {
+            "tool_name": tool_name,
+            "args": args,
+            "status": "completed",
+            "summary": "Fetched one web page.",
+            "content": str(getattr(result, "text", "") or ""),
+            "web_sources": [page],
+        }
+    if not request_config.allow_mcp:
+        raise ValueError(f"Tool '{tool_name}' is not enabled.")
+    mcp_provider = _runtime().mcp_tool_provider
+    if mcp_provider is None:
+        raise ValueError("MCP provider is unavailable.")
+    result = await mcp_provider.call_tool(tool_name, args)
+    return {
+        "tool_name": tool_name,
+        "args": args,
+        "status": "failed" if bool(result.get("is_error")) else "completed",
+        "summary": f"Called MCP tool '{tool_name}'.",
+        "content": str(result.get("text") or ""),
+        "structured_content": result.get("structured_content"),
+        "tool_sources": [
+            {
+                "kind": "mcp",
+                "title": tool_name,
+                "tool_name": tool_name,
+                "summary": str(result.get("text") or "")[:800],
+            }
+        ],
     }
 
 
@@ -1071,12 +1259,20 @@ async def main_route_node(
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
     assessment_guidance = _latest_assessment_guidance(messages, turn_id=turn_id)
 
+    tool_status_lines = [
+        f"- 网络搜索: {'ON' if request_config.allow_web_search else 'OFF'}",
+        f"- MCP 外部工具: {'ON' if request_config.allow_mcp else 'OFF'}",
+        f"- 文件读取: {'ON' if request_config.allow_file_read else 'OFF'}",
+        f"- 文件写入: {'ON' if request_config.allow_file_write else 'OFF'}",
+    ]
+
     system_prompt, user_prompt = build_main_route_messages(
         question=question,
         short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
         memory_context=_message_text(memory_message.content) if memory_message is not None else "",
         interventions=[_message_text(message.content) for message in intervention_messages],
         assessment_guidance=assessment_guidance,
+        disabled_capabilities=tool_status_lines,
     )
     bound_model = runtime.chat_model.bind_tools(_dispatch_schema())
     response = await bound_model.ainvoke(
@@ -1094,12 +1290,17 @@ async def main_route_node(
     run_retrieval = bool(args.get("run_retrieval", False))
     retrieval_query = str(args.get("retrieval_query") or question)
     retrieval_reason = str(args.get("retrieval_reason") or "Need project-grounded evidence.")
-    run_tool = bool(args.get("run_tool", False))
-    tool_query = str(args.get("tool_query") or question)
-    tool_reason = str(args.get("tool_reason") or "Need external or tool-based information.")
     task_messages: list[BaseMessage] = []
     retrieve_task: AgentTask | None = None
-    tool_task: AgentTask | None = None
+
+    log_routing_decision(
+        turn_id=turn_id,
+        question=question,
+        run_retrieval=run_retrieval,
+        run_memory=run_memory,
+        retrieval_query=retrieval_query,
+        disabled_capabilities=[cap for cap in tool_status_lines if "OFF" in cap],
+    )
 
     if run_retrieval:
         retrieval_query, retrieval_reason, retrieval_metadata = _structure_retrieval_task_for_synthesis(
@@ -1121,21 +1322,13 @@ async def main_route_node(
             metadata={"project_id": request_config.project_id, **retrieval_metadata},
         )
         task_messages.append(_build_agent_task_message(turn_id=turn_id, task=retrieve_task))
-
-    if run_tool:
-        tool_task = AgentTask(
-            task_id=f"task_tool_{uuid4().hex[:8]}",
-            task_type="tool_research",
-            agent_name="tool_agent",
-            query=tool_query,
-            reason=tool_reason,
-            constraints={
-                "top_k": AgentSettings.from_env().web_search_result_limit,
-                "fetch_top_url": True,
-            },
-            metadata={},
+        log_specialist_dispatch(
+            turn_id=turn_id,
+            agent_name="retrieval_agent",
+            task_id=retrieve_task.task_id,
+            query=retrieval_query,
+            reason=retrieval_reason,
         )
-        task_messages.append(_build_agent_task_message(turn_id=turn_id, task=tool_task))
 
     if not run_memory and speculative_runs.get("speculative_memory"):
         _discard_speculative_run(runtime, str(speculative_runs["speculative_memory"].get("run_id") or ""))
@@ -1146,7 +1339,7 @@ async def main_route_node(
 
     dispatched_agents = [
         task.agent_name
-        for task in (retrieve_task, tool_task)
+        for task in (retrieve_task,)
         if task is not None
     ]
     task_messages.append(
@@ -1170,7 +1363,6 @@ async def main_route_node(
         "memory_query": memory_query,
         "memory_reason": memory_reason,
         "retrieve_task": retrieve_task,
-        "tool_task": tool_task,
         "speculative_memory": speculative_runs.get("speculative_memory"),
         "speculative_retrieval": speculative_runs.get("speculative_retrieval"),
         "retrieve_result": None,
@@ -1206,7 +1398,6 @@ async def parallel_specialists_node(
 
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     retrieve_task = state.get("retrieve_task")
-    tool_task = state.get("tool_task")
 
     async def run_retrieval() -> tuple[AgentResult | None, list[BaseMessage]]:
         if retrieve_task is None:
@@ -1258,29 +1449,9 @@ async def parallel_specialists_node(
             config=config,
         )
 
-    async def run_tool() -> tuple[AgentResult | None, list[BaseMessage]]:
-        if tool_task is None:
-            return None, []
-        return await _invoke_specialist_subgraph(
-            graph=tool_agent_graph,
-            task_key="tool_task",
-            result_key="tool_result",
-            task=tool_task,
-            turn_id=turn_id,
-            config=config,
-        )
+    retrieval_result, retrieval_messages = await run_retrieval()
 
-    retrieval_output, tool_output = await asyncio.gather(
-        run_retrieval(),
-        run_tool(),
-    )
-    retrieval_result, retrieval_messages = retrieval_output
-    tool_result, tool_messages = tool_output
-
-    output_messages: list[BaseMessage] = [
-        *retrieval_messages,
-        *tool_messages,
-    ]
+    output_messages: list[BaseMessage] = list(retrieval_messages)
     if retrieval_result is not None:
         output_messages.extend(
             _fallback_agent_result_messages(
@@ -1289,26 +1460,17 @@ async def parallel_specialists_node(
                 existing_messages=retrieval_messages,
             )
         )
-    if tool_result is not None:
-        output_messages.extend(
-            _fallback_agent_result_messages(
-                turn_id=turn_id,
-                result=tool_result,
-                existing_messages=tool_messages,
-            )
-        )
     output_messages.append(
         _build_loop_status_message(
             turn_id=turn_id,
             phase="parallel_specialists_complete",
-            summary="Parallel specialist execution finished.",
+            summary="Specialist execution finished.",
             iteration_count=int(state.get("iteration_count", 0) or 0),
             metadata={
                 "completed_agents": [
                     agent_name
                     for agent_name, result in [
                         ("retrieval_agent", retrieval_result),
-                        ("tool_agent", tool_result),
                     ]
                     if result is not None
                 ],
@@ -1318,7 +1480,7 @@ async def parallel_specialists_node(
     return {
         "messages": output_messages,
         "retrieve_result": retrieval_result.to_dict() if retrieval_result is not None else None,
-        "tool_result": tool_result.to_dict() if tool_result is not None else None,
+        "tool_result": None,
         "speculative_retrieval": None,
     }
 
@@ -1430,8 +1592,6 @@ async def assess_node(
     config: RunnableConfig | None = None,
 ) -> PaperLabGraphState:
     """Ask the model whether to answer now or continue the evidence loop."""
-
-    del config
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     messages = list(state.get("messages", []))
     question = _latest_human_text(messages)
@@ -1439,7 +1599,6 @@ async def assess_node(
     memory_message = _latest_tool_message(messages, "search_memory", turn_id=turn_id)
     intervention_messages = _latest_messages_by_artifact(messages, "intervention", turn_id=turn_id)
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
-    tool_result = dict(state.get("tool_result", {}) or {})
 
     iteration_count = int(state.get("iteration_count", 0) or 0)
     max_iterations = int(state.get("max_iterations", 1) or 1)
@@ -1451,7 +1610,6 @@ async def assess_node(
         interventions=[_message_text(message.content) for message in intervention_messages],
         specialist_payloads=[
             _stringify_for_prompt(retrieve_result) if retrieve_result else "",
-            _stringify_for_prompt(tool_result) if tool_result else "",
         ],
         must_answer=must_answer,
     )
@@ -1474,33 +1632,28 @@ async def assess_node(
     stop_reason = ""
     if must_answer and not answer_confident:
         stop_reason = "max_iterations_reached"
-        return await _force_answer_after_stop_condition(
-            state=state,
-            turn_id=turn_id,
-            question=question,
-            short_term_message=short_term_message,
-            memory_message=memory_message,
-            intervention_messages=intervention_messages,
-            retrieve_result=retrieve_result,
-            tool_result=tool_result,
-            stop_reason=stop_reason,
+        return await synthesize_node(
+            {
+                **state,
+                "answer_confident": True,
+                "stop_reason": stop_reason,
+                "retrieve_result": retrieve_result,
+                "tool_result": None,
+                "assessment_next_tasks": next_tasks,
+                "assessment_loop_reason": str(loop_decision.get("reason") or ""),
+            },
+            config,
         )
     if answer_confident:
-        return _build_assistant_answer_update(
-            state=state,
-            raw_answer=raw_assessment,
-            answer_text=decision.answer
-            or "I do not have enough evidence to provide a fully grounded answer.",
-            progress_summary=decision.summary,
-            retrieve_result=retrieve_result,
-            tool_result=tool_result,
-            turn_id=turn_id,
-            question=question,
-            short_term_message=short_term_message,
-            memory_message=memory_message,
-            intervention_messages=intervention_messages,
-            answer_confident=True,
-            stop_reason=stop_reason,
+        return await synthesize_node(
+            {
+                **state,
+                "answer_confident": True,
+                "stop_reason": stop_reason,
+                "retrieve_result": retrieve_result,
+                "tool_result": None,
+            },
+            config,
         )
     if answer_confident:
         status_summary = "Assess found enough evidence for synthesis."
@@ -1528,58 +1681,6 @@ async def assess_node(
     }
 
 
-async def _force_answer_after_stop_condition(
-    *,
-    state: PaperLabGraphState,
-    turn_id: str,
-    question: str,
-    short_term_message: BaseMessage | None,
-    memory_message: BaseMessage | None,
-    intervention_messages: list[BaseMessage],
-    retrieve_result: dict[str, Any],
-    tool_result: dict[str, Any],
-    stop_reason: str,
-) -> PaperLabGraphState:
-    synthesis_prompt = build_synthesis_prompt(
-        question=question,
-        short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
-        memory_context=_message_text(memory_message.content) if memory_message is not None else "",
-        interventions=[_message_text(message.content) for message in intervention_messages],
-        specialist_payloads=[
-            _stringify_for_prompt(retrieve_result) if retrieve_result else "",
-            _stringify_for_prompt(tool_result) if tool_result else "",
-        ],
-    )
-    forced_prompt = (
-        synthesis_prompt
-        + "\n\nThe evidence loop stop condition has been reached. "
-        + "You must provide the best grounded answer possible using the available specialist results. "
-        + "Prefer a concise synthesis over saying that evidence is insufficient. "
-        + "State uncertainty only where it materially affects the answer."
-    )
-    raw_forced_answer = await _runtime().chat_model.bind_tools(_memory_write_schema()).ainvoke(
-        _append_memory_write_policy(forced_prompt)
-    )
-    answer_text, progress_summary = parse_structured_assistant_output(
-        _message_text(getattr(raw_forced_answer, "content", raw_forced_answer))
-    )
-    return _build_assistant_answer_update(
-        state=state,
-        raw_answer=raw_forced_answer,
-        answer_text=answer_text or "已基于当前检索结果生成最佳可得回答。",
-        progress_summary=progress_summary,
-        retrieve_result=retrieve_result,
-        tool_result=tool_result,
-        turn_id=turn_id,
-        question=question,
-        short_term_message=short_term_message,
-        memory_message=memory_message,
-        intervention_messages=intervention_messages,
-        answer_confident=True,
-        stop_reason=stop_reason,
-    )
-
-
 def _append_memory_write_policy(prompt: str) -> str:
     return (
         prompt
@@ -1594,6 +1695,47 @@ def _append_memory_write_policy(prompt: str) -> str:
         + "- If not storing, do not claim that the information has been remembered across sessions.\n"
         + "- If unsure, call `decide_memory_write` with `action=none`."
     )
+
+
+def _fallback_answer_from_specialist_results(
+    *,
+    retrieve_result: dict[str, Any],
+    tool_result: dict[str, Any] | None = None,
+) -> str:
+    retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
+    evidence_pack = dict(retrieve_metadata.get("evidence_pack", {}) or {})
+    documents = list(evidence_pack.get("documents", []) or [])
+    if documents:
+        lines = [f"当前项目库中共有 {len(documents)} 篇论文："]
+        for index, document in enumerate(documents, start=1):
+            if not isinstance(document, dict):
+                continue
+            title = str(document.get("title") or document.get("id") or "").strip()
+            source_path = str(document.get("source_path") or "").strip()
+            suffix = f" ({source_path})" if source_path else ""
+            if title:
+                lines.append(f"{index}. {title}{suffix}")
+        if len(lines) > 1:
+            return "\n".join(lines)
+
+    retrieve_summary = str(
+        retrieve_result.get("summary")
+        or retrieve_metadata.get("retrieval_conclusion")
+        or dict(retrieve_metadata.get("progress_summary", {}) or {}).get("done")
+        or ""
+    ).strip()
+    if retrieve_summary:
+        return retrieve_summary
+
+    tool_result = tool_result or {}
+    tool_metadata = dict(tool_result.get("metadata", {}) or {})
+    tool_summary = str(
+        tool_result.get("summary")
+        or tool_metadata.get("summary")
+        or dict(tool_metadata.get("progress_summary", {}) or {}).get("done")
+        or ""
+    ).strip()
+    return tool_summary
 
 
 def _build_assistant_answer_update(
@@ -1625,6 +1767,12 @@ def _build_assistant_answer_update(
 
     retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
     tool_metadata = dict(tool_result.get("metadata", {}) or {})
+    answer_additional_kwargs = dict(getattr(raw_answer, "additional_kwargs", {}) or {})
+    answer_response_metadata = dict(getattr(raw_answer, "response_metadata", {}) or {})
+    answer_reasoning = getattr(raw_answer, "reasoning_content", None) or answer_additional_kwargs.get("reasoning_content")
+    if answer_reasoning:
+        answer_additional_kwargs["reasoning_content"] = answer_reasoning
+        answer_response_metadata["reasoning_content"] = answer_reasoning
     assistant_message = _build_assistant_message(
         turn_id=turn_id,
         content=answer_text,
@@ -1655,6 +1803,8 @@ def _build_assistant_answer_update(
             },
         },
         raw_id=getattr(raw_answer, "id", None),
+        additional_kwargs=answer_additional_kwargs,
+        response_metadata=answer_response_metadata,
     )
     return {
         "messages": [assistant_message],
@@ -1669,6 +1819,7 @@ async def synthesize_node(
 ) -> PaperLabGraphState:
     """Synthesize specialist results into the final assistant answer."""
 
+    request_config = resolve_agent_request_config(dict(config or {}))
     turn_id = str(state.get("active_turn_id") or f"turn_{uuid4().hex[:8]}")
     messages = list(state.get("messages", []))
     question = _latest_human_text(messages)
@@ -1686,104 +1837,315 @@ async def synthesize_node(
     dependencies.extend(_message_id(message) for message in intervention_messages if _message_id(message))
 
     retrieve_result = dict(state.get("retrieve_result", {}) or {})
-    tool_result = dict(state.get("tool_result", {}) or {})
-    if not retrieve_result and not tool_result:
+    if not retrieve_result:
         for message in result_messages:
             result_payload = dict(_message_meta(message).get("result", {}) or {})
-            if result_payload.get("agent_name") == "retrieval_agent" and not retrieve_result:
+            if result_payload.get("agent_name") == "retrieval_agent":
                 retrieve_result = result_payload
-            elif result_payload.get("agent_name") == "tool_agent" and not tool_result:
-                tool_result = result_payload
+                break
+
+    assessment_guidance_list = []
+    loop_reason = str(state.get("assessment_loop_reason") or "").strip()
+    if loop_reason:
+        assessment_guidance_list.append(f"证据不完整的原因: {loop_reason}")
+    for item in list(state.get("assessment_next_tasks", []) or []):
+        item_str = str(item).strip()
+        if item_str:
+            assessment_guidance_list.append(item_str)
 
     synthesis_prompt = build_synthesis_prompt(
         question=question,
         short_term_context=_message_text(short_term_message.content) if short_term_message is not None else "",
         memory_context=_message_text(memory_message.content) if memory_message is not None else "",
         interventions=[_message_text(message.content) for message in intervention_messages],
-        specialist_payloads=[
-            _stringify_for_prompt(retrieve_result) if retrieve_result else "",
-            _stringify_for_prompt(tool_result) if tool_result else "",
-        ],
+        specialist_payloads=[_stringify_for_prompt(retrieve_result) if retrieve_result else ""],
+        assessment_guidance=assessment_guidance_list,
     )
-    memory_decision_prompt = (
-        synthesis_prompt
-        + "\n\nMemory write policy:\n"
-        + "- You must call `decide_memory_write` exactly once after producing the final answer.\n"
-        + "- This memory is long-term and cross-session, not short-term scratch space.\n"
-        + "- Default to `action=none`.\n"
-        + "- Use `action=store` only for stable long-term user preferences, durable project facts, shared project constraints, or reusable research lessons.\n"
-        + "- Stable name/preferred form of address, enduring collaboration preferences, and declared long-term research directions are valid long-term memory candidates.\n"
-        + "- Do not store ordinary answers, temporary tasks, uncertain claims, private/sensitive data, duplicate memory, or details that can simply be re-retrieved from papers later.\n"
-        + "- If you say in the answer that you will remember, have remembered, or will use this preference later, the tool call must be `action=store` with the exact durable fact to persist.\n"
-        + "- If not storing, do not claim that the information has been remembered across sessions.\n"
-        + "- If unsure, call `decide_memory_write` with `action=none`."
+    memory_decision_prompt = synthesis_prompt + (
+        "\n\n【重要】你的消息内容中必须包含面向用户的文本回答。"
+        "不要只返回工具调用而不包含文本内容。"
+        "文本内容应基于所有可用证据和工具结果，向用户汇报结果。\n\n"
+        "记忆写入策略：\n"
+        "- 生成最终回答后，必须调用一次 decide_memory_write。\n"
+        "- 记忆是长期的、跨会话的，不是短期临时空间。\n"
+        "- 默认 action=none。\n"
+        "- 仅在以下情况使用 action=store：稳定的用户偏好、持久化的项目事实、共享的项目约束、可复用的研究经验。\n"
+        "- 不要存储普通回答、临时任务、不确定的声明、隐私数据、重复记忆。\n"
+        "- 如果不存储，不要声称信息已被跨会话记住。\n"
+        "- 不确定时，调用 decide_memory_write 并设 action=none。"
     )
+    if str(state.get("stop_reason") or "") == "max_iterations_reached":
+        memory_decision_prompt += (
+            "\n\n证据循环已达到停止条件。"
+            "请基于当前工具和证据给出最佳回答，不要推迟回答。"
+            "如果重要信息仍缺失，明确说明不确定的部分，并在回答和摘要中推荐最有价值的后续调查方向。"
+        )
     tool_observations: list[dict[str, object]] = []
     tool_trace_messages: list[BaseMessage] = []
-    if bool(dict(config or {}).get("configurable", {}).get("tools_enabled", False)):
-        tool_prompt = (
-            memory_decision_prompt
-            + "\n\nWorkspace tools are enabled. You may call file tools if local files or command output are needed. "
-            + "Use read-only tools freely. write_file, mkdir, and run_command require user approval."
+    workspace_tool_schemas = _main_workspace_tool_schema(request_config)
+    external_tool_schemas: list[dict[str, object]] = []
+    raw_answer: Any | None = None
+    current_prompt = memory_decision_prompt
+    tool_search_exhausted = False
+    tool_status_lines = [
+        f"- 网络搜索: {'ON' if request_config.allow_web_search else 'OFF'}",
+        f"- MCP 外部工具: {'ON' if request_config.allow_mcp else 'OFF'}",
+        f"- 文件读取: {'ON' if request_config.allow_file_read else 'OFF'}",
+        f"- 文件写入: {'ON' if request_config.allow_file_write else 'OFF'}",
+    ]
+    current_prompt += "\n\n当前工具权限：\n" + "\n".join(tool_status_lines)
+    if workspace_tool_schemas or external_tool_schemas or request_config.allow_web_search or request_config.allow_mcp:
+        current_prompt += (
+            "\n\n你有一组可用工具。任务匹配时直接使用。"
+            "如果当前工具都不适合，调用 `tool_search` 发现更多工具。"
+            "不要猜测工具名称或编造工具能力——只使用实际暴露给你的工具。"
+            "如果搜索后仍没有合适工具，如实告知用户你无法做什么，以及需要什么工具或能力。"
+            "\n\n【重要】你有两种模式：工具调用模式和回答模式。"
+            "当前是工具调用模式——继续调用工具，不要生成最终回答。"
+            "只有当用户要求的所有操作都完成后，才切换到回答模式。"
+            "例如：用户要求'查看文件并写入记录'，你必须先调用读取工具，再调用写入工具，两者都完成后才生成回答。"
+            "如果你只完成了读取但没有写入，说明任务未完成，继续调用写入工具。"
         )
-        tool_model = _runtime().chat_model.bind_tools([*_memory_write_schema(), *_main_workspace_tool_schema()])
-        tool_answer = await tool_model.ainvoke(tool_prompt)
-        workspace_tool_calls = [
+    has_actionable_tools = bool(workspace_tool_schemas or external_tool_schemas or request_config.allow_web_search or request_config.allow_mcp)
+    for _ in range(10):
+        bound_tools = [*_memory_write_schema(), *workspace_tool_schemas, *external_tool_schemas]
+        if not tool_search_exhausted and (request_config.allow_web_search or request_config.allow_mcp):
+            bound_tools.append(_tool_search_virtual_schema())
+        if len(bound_tools) <= 1:
+            break
+        tool_answer = await _runtime().chat_model.bind_tools(bound_tools).ainvoke(current_prompt)
+        log_llm_call(
+            turn_id=turn_id,
+            stage="assess_tool_loop",
+            prompt_preview=current_prompt[:500],
+            response_preview=str(getattr(tool_answer, "content", ""))[:500],
+            tool_count=len(bound_tools),
+        )
+        actionable_calls = [
             call
             for call in _extract_tool_calls(tool_answer)
-            if str(call.get("name") or "") in {
+            if str(call.get("name") or "") != "decide_memory_write"
+        ]
+        if not actionable_calls:
+            raw_answer = tool_answer
+            break
+        new_observations: list[dict[str, object]] = []
+        known_external_names = {
+            str(schema.get("function", {}).get("name") or "")
+            for schema in external_tool_schemas
+        }
+        for call in actionable_calls[:4]:
+            tool_name = str(call.get("name") or "")
+            call_args = _coerce_tool_call_args(call)
+            log_tool_call(turn_id=turn_id, tool_name=tool_name, args=call_args, source="assess_loop")
+            if tool_name == "tool_search":
+                call_args = _coerce_tool_call_args(call)
+                search_task = AgentTask(
+                    task_id=f"task_tool_inline_{uuid4().hex[:8]}",
+                    task_type="tool_research",
+                    agent_name="tool_agent",
+                    query=str(call_args.get("query") or question),
+                    reason=str(call_args.get("reason") or "Need additional external tool options."),
+                    constraints={"max_tools": 4},
+                    metadata={
+                        "allow_web_search": request_config.allow_web_search,
+                        "allow_mcp": request_config.allow_mcp,
+                        "already_exposed_tools": sorted(known_external_names),
+                    },
+                )
+                search_result = await run_tool_specialist(task=search_task)
+                result_metadata = dict(search_result.metadata or {})
+                termination_reason = str(result_metadata.get("termination_reason") or "")
+                new_schemas = _external_tool_schemas_from_result(
+                    {"metadata": result_metadata},
+                    request_config=request_config,
+                )
+                existing_names = {
+                    str(schema.get("function", {}).get("name") or "")
+                    for schema in external_tool_schemas
+                }
+                for schema in new_schemas:
+                    name = str(schema.get("function", {}).get("name") or "")
+                    if name and name not in existing_names:
+                        external_tool_schemas.append(schema)
+                        existing_names.add(name)
+                if termination_reason == "no_match" or search_result.status == "skipped":
+                    tool_search_exhausted = True
+                    observation = {
+                        "tool_name": "tool_search",
+                        "args": call_args,
+                        "status": "no_match",
+                        "summary": "No matching tools found.",
+                        "content": (
+                            "No matching tools were found for this query. "
+                            "Do not call tool_search again. "
+                            "Answer with the tools already available, or tell the user honestly "
+                            "that the requested capability is not available."
+                        ),
+                    }
+                else:
+                    recommended = list(result_metadata.get("recommended_tools", []) or [])
+                    readable_lines = []
+                    for tool in recommended:
+                        name = str(tool.get("name") or "")
+                        desc = str(tool.get("description") or "")
+                        why = str(tool.get("why_selected") or "")
+                        readable_lines.append(f"- **{name}**: {desc}")
+                        if why:
+                            readable_lines.append(f"  选择理由: {why}")
+                    observation = {
+                        "tool_name": "tool_search",
+                        "args": call_args,
+                        "status": search_result.status,
+                        "summary": search_result.summary,
+                        "content": "\n".join(readable_lines) if readable_lines else "No tools found.",
+                        "recommended_tools": recommended,
+                    }
+            elif tool_name in {
+                "get_current_time",
                 "detect_platform",
                 "list_files",
                 "find_files",
                 "search_text",
                 "read_file",
-                "mkdir",
                 "write_file",
+                "delete_file",
                 "run_command",
-            }
-        ]
-        for call in workspace_tool_calls[:4]:
-            observation = _execute_main_workspace_tool(call)
-            tool_observations.append(observation)
+            }:
+                try:
+                    observation = _execute_main_workspace_tool(call, request_config=request_config)
+                except Exception as exc:
+                    if interrupt is not None and "Interrupt" in type(exc).__name__:
+                        raise
+                    observation = {
+                        "tool_name": tool_name,
+                        "args": call_args,
+                        "status": "error",
+                        "summary": f"工具调用失败: {exc}",
+                        "content": f"错误信息: {exc}",
+                    }
+            elif tool_name in known_external_names:
+                try:
+                    observation = await _execute_selected_external_tool(call, request_config=request_config)
+                except Exception as exc:
+                    if interrupt is not None and "Interrupt" in type(exc).__name__:
+                        raise
+                    observation = {
+                        "tool_name": tool_name,
+                        "args": call_args,
+                        "status": "error",
+                        "summary": f"工具调用失败: {exc}",
+                        "content": f"错误信息: {exc}",
+                    }
+            else:
+                continue
+            new_observations.append(observation)
+            log_tool_result(
+                turn_id=turn_id,
+                tool_name=tool_name,
+                status=str(observation.get("status") or ""),
+                summary=str(observation.get("summary") or ""),
+                content_preview=str(observation.get("content") or "")[:300],
+            )
             trace_text = str(observation.get("summary") or "")
             trace_content = str(observation.get("content") or "")
             if trace_content:
                 trace_text = f"{trace_text}\n\n{trace_content}" if trace_text else trace_content
+            is_workspace = tool_name in {
+                "get_current_time",
+                "detect_platform",
+                "list_files",
+                "find_files",
+                "search_text",
+                "read_file",
+                "write_file",
+                "delete_file",
+                "run_command",
+            }
+            trace_metadata: dict[str, Any] = {
+                "artifact_type": "workspace_tool_result" if is_workspace else "external_tool_result",
+                "tool_name": str(observation.get("tool_name") or tool_name),
+                "args": dict(observation.get("args", {}) or {}),
+                "status": str(observation.get("status") or ""),
+                "reusable": False,
+            }
+            if tool_name == "tool_search":
+                trace_metadata["recommended_tools"] = list(observation.get("recommended_tools", []) or [])
             tool_trace_messages.append(
                 _build_tool_message(
                     turn_id=turn_id,
-                    name="workspace_tool",
+                    name="workspace_tool" if is_workspace else "external_tool",
                     content=trace_text,
-                    metadata={
-                        "artifact_type": "workspace_tool_result",
-                        "tool_name": str(observation.get("tool_name") or ""),
-                        "args": dict(observation.get("args", {}) or {}),
-                        "status": str(observation.get("status") or ""),
-                        "reusable": False,
-                    },
+                    metadata=trace_metadata,
                     tool_call_id=str(call.get("id") or ""),
                 )
             )
-        if tool_observations:
-            memory_decision_prompt += (
-                "\n\nWorkspace tool observations:\n"
-                + _stringify_for_prompt(tool_observations)
-            )
+        if not new_observations:
+            raw_answer = tool_answer
+            break
+        tool_observations.extend(new_observations)
+        current_prompt = (
+            memory_decision_prompt
+            + "\n\nTool observations:\n"
+            + _stringify_for_prompt(tool_observations)
+        )
 
-    bound_model = _runtime().chat_model.bind_tools(_memory_write_schema())
-    raw_answer = await bound_model.ainvoke(memory_decision_prompt)
+    if raw_answer is None:
+        if has_actionable_tools:
+            bound_model = _runtime().chat_model.bind_tools(_memory_write_schema())
+            raw_answer = await bound_model.ainvoke(current_prompt)
+        else:
+            raw_answer = await _runtime().chat_model.ainvoke(current_prompt)
     memory_write_decision = _parse_memory_write_decision(raw_answer)
     answer_text, progress_summary = parse_structured_assistant_output(
         _message_text(getattr(raw_answer, "content", raw_answer))
     )
+    if not answer_text.strip():
+        answer_text = _fallback_answer_from_specialist_results(
+            retrieve_result=retrieve_result,
+        )
+    if not answer_text.strip() and tool_observations:
+        summary_prompt = (
+            "以下工具操作已执行完毕。"
+            "请用中文向用户清晰、简洁地汇报结果。\n\n"
+            + _stringify_for_prompt(tool_observations)
+        )
+        summary_response = await _runtime().chat_model.ainvoke(summary_prompt)
+        answer_text = _message_text(getattr(summary_response, "content", summary_response))
+
+    log_synthesis(
+        turn_id=turn_id,
+        question=question,
+        answer_text=answer_text,
+        tool_observations_count=len(tool_observations),
+        has_retrieval=bool(retrieve_result),
+    )
 
     retrieve_metadata = dict(retrieve_result.get("metadata", {}) or {})
-    tool_metadata = dict(tool_result.get("metadata", {}) or {})
+    tool_metadata: dict[str, Any] = {}
     workspace_sources: list[dict[str, object]] = []
     changed_files: list[str] = []
+    executed_external_sources: list[dict[str, object]] = []
     for observation in tool_observations:
         for path in list(observation.get("changed_files", []) or []):
             changed_files.append(str(path))
+        tool_name = str(observation.get("tool_name") or "")
+        if tool_name in {"web_search", "url_fetch"}:
+            for source in list(observation.get("web_sources", []) or []):
+                if isinstance(source, dict):
+                    executed_external_sources.append(
+                        {
+                            "kind": "web",
+                            "title": str(source.get("title") or source.get("url") or tool_name),
+                            "url": str(source.get("url") or ""),
+                            "summary": str(source.get("snippet") or source.get("excerpt") or ""),
+                            "tool_name": tool_name,
+                        }
+                    )
+        elif tool_name not in {"get_current_time", "detect_platform", "list_files", "find_files", "search_text", "read_file", "write_file", "delete_file", "run_command", "tool_search"}:
+            for source in list(observation.get("tool_sources", []) or []):
+                if isinstance(source, dict):
+                    executed_external_sources.append(dict(source))
     if tool_observations:
         workspace_sources.extend(
             {
@@ -1793,6 +2155,12 @@ async def synthesize_node(
             }
             for observation in tool_observations
         )
+    answer_additional_kwargs = dict(getattr(raw_answer, "additional_kwargs", {}) or {})
+    answer_response_metadata = dict(getattr(raw_answer, "response_metadata", {}) or {})
+    answer_reasoning = getattr(raw_answer, "reasoning_content", None) or answer_additional_kwargs.get("reasoning_content")
+    if answer_reasoning:
+        answer_additional_kwargs["reasoning_content"] = answer_reasoning
+        answer_response_metadata["reasoning_content"] = answer_reasoning
     assistant_message = _build_assistant_message(
         turn_id=turn_id,
         content=answer_text,
@@ -1807,7 +2175,7 @@ async def synthesize_node(
             else [],
             "evidence_counts": dict(retrieve_metadata.get("evidence_counts", {})),
             "web_sources": list(tool_metadata.get("web_sources", [])),
-            "tool_sources": list(tool_metadata.get("tool_sources", [])),
+            "tool_sources": [*list(tool_metadata.get("tool_sources", [])), *executed_external_sources],
             "workspace_sources": workspace_sources,
             "workspace_tool_calls": tool_observations,
             "changed_files": changed_files,
@@ -1825,6 +2193,8 @@ async def synthesize_node(
             },
         },
         raw_id=getattr(raw_answer, "id", None),
+        additional_kwargs=answer_additional_kwargs,
+        response_metadata=answer_response_metadata,
     )
     return {
         "messages": [*tool_trace_messages, assistant_message],

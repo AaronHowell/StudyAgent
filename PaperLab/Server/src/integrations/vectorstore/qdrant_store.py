@@ -53,6 +53,21 @@ class QdrantConnectionConfig:
     document_collection_name: str = "paperlab_documents"
 
 
+def normalize_qdrant_connection_kwargs(
+    *,
+    url: str = "",
+    host: str = "",
+    port: int = 6333,
+    api_key: str = "",
+) -> dict[str, object]:
+    """Build Qdrant client kwargs without rewriting the configured transport."""
+
+    api_key_value = api_key or None
+    if url:
+        return {"url": url, "api_key": api_key_value}
+    return {"host": host, "port": port, "api_key": api_key_value}
+
+
 class QdrantChunkVectorStore:
     """Qdrant-backed vector store for document chunks and retrieval profiles.
 
@@ -73,21 +88,17 @@ class QdrantChunkVectorStore:
         """
 
         self.config = config
-        if config.url:
-            self.client = QdrantClient(
-                url=config.url,
-                api_key=config.api_key or None,
-                timeout=config.timeout_seconds,
-                trust_env=config.trust_env,
-            )
-        else:
-            self.client = QdrantClient(
-                host=config.host,
-                port=config.port,
-                api_key=config.api_key or None,
-                timeout=config.timeout_seconds,
-                trust_env=config.trust_env,
-            )
+        connection_kwargs = normalize_qdrant_connection_kwargs(
+            url=config.url,
+            host=config.host,
+            port=config.port,
+            api_key=config.api_key,
+        )
+        self.client = QdrantClient(
+            timeout=config.timeout_seconds,
+            trust_env=config.trust_env,
+            **connection_kwargs,
+        )
 
     def ensure_collection(self, vector_size: int) -> None:
         """Ensure the chunk collection exists with a default named-vector layout.

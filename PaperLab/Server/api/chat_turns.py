@@ -87,11 +87,24 @@ def build_turns_from_messages(messages: list[BaseMessage]) -> list[ChatTurnRespo
     return turns
 
 
+_SUPPRESSED_LOOP_PHASES = frozenset({
+    "guidance_gate_pre_route",
+    "guidance_gate_post_route",
+    "guidance_gate_pre_assess",
+    "main_route_complete",
+    "parallel_specialists_complete",
+    "assess_complete",
+})
+
+
 def build_trace_item(message: BaseMessage, *, index: int) -> ChatTraceItemResponse | None:
     metadata = dict(message_meta(message))
     artifact_type = str(metadata.get("artifact_type") or "")
     content = message_text(getattr(message, "content", ""))
     if not content and artifact_type not in {"agent_task"}:
+        return None
+
+    if artifact_type == "loop_status" and str(metadata.get("phase") or "") in _SUPPRESSED_LOOP_PHASES:
         return None
 
     name = message_name(message)
@@ -117,6 +130,13 @@ def build_trace_item(message: BaseMessage, *, index: int) -> ChatTraceItemRespon
     elif artifact_type == "workspace_tool_result":
         kind = "tool_result"
         title = str(metadata.get("tool_name") or "工具结果")
+    elif artifact_type == "external_tool_result":
+        kind = "tool_result"
+        tool_name = str(metadata.get("tool_name") or "")
+        if tool_name == "tool_search":
+            title = "工具发现"
+        else:
+            title = tool_name or "外部工具"
     elif artifact_type == "retrieval_reasoning":
         title = "检索思路"
     elif artifact_type == "retrieval_tool_call":
@@ -126,6 +146,12 @@ def build_trace_item(message: BaseMessage, *, index: int) -> ChatTraceItemRespon
         kind = "tool_result"
         title = str(metadata.get("tool_name") or "检索结果")
 
+    trace_metadata: dict[str, object] | None = None
+    if artifact_type == "external_tool_result" and str(metadata.get("tool_name") or "") == "tool_search":
+        recommended = metadata.get("recommended_tools")
+        if recommended:
+            trace_metadata = {"recommended_tools": recommended}
+
     return ChatTraceItemResponse(
         id=str(getattr(message, "id", "") or f"trace-{index}"),
         kind=kind,
@@ -133,6 +159,7 @@ def build_trace_item(message: BaseMessage, *, index: int) -> ChatTraceItemRespon
         text=content,
         status="completed",
         created_at=str(metadata.get("created_at") or ""),
+        metadata=trace_metadata,
     )
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -13,8 +13,8 @@ from contracts import AgentTask
 from orchestration.graph_messages import _build_agent_result_message
 from orchestration.graph_messages import _coerce_tool_call_args
 from orchestration.graph_messages import _extract_tool_calls
-from orchestration.output_summary import build_progress_summary
 from orchestration.graph_state import ToolAgentGraphState
+from orchestration.output_summary import build_progress_summary
 from orchestration.request_config import _coerce_positive_int
 from orchestration.runtime_access import _runtime
 from runtime import CancellationToken
@@ -45,50 +45,38 @@ def _graph_runtime():
     return _runtime()
 
 
-def _tool_agent_choice_schema(mcp_tools: list[dict[str, Any]]) -> list[dict[str, object]]:
-    schemas: list[dict[str, object]] = [
+def _tool_search_selection_schema() -> list[dict[str, object]]:
+    return [
         {
             "type": "function",
             "function": {
-                "name": "web_search",
-                "description": "Search the public web for external information.",
+                "name": "recommend_tools",
+                "description": "Select the most relevant tools for the supervisor to consider next.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
-                        "top_k": {"type": "integer"},
+                        "selected_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "reasons": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "why_selected": {"type": "string"},
+                                },
+                                "required": ["name", "why_selected"],
+                            },
+                        },
+                        "termination_reason": {"type": "string"},
                     },
-                    "required": ["query"],
+                    "required": ["selected_names", "reasons", "termination_reason"],
                 },
             },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "url_fetch",
-                "description": "Fetch the body text for one explicit URL.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"url": {"type": "string"}},
-                    "required": ["url"],
-                },
-            },
-        },
+        }
     ]
-    for tool in mcp_tools:
-        schemas.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": str(tool.get("name") or ""),
-                    "description": str(tool.get("description") or "Call one MCP tool."),
-                    "parameters": dict(
-                        tool.get("input_schema", {}) or {"type": "object", "properties": {}}
-                    ),
-                },
-            }
-        )
-    return schemas
 
 
 def _serialize_tool_source(
@@ -108,16 +96,74 @@ def _serialize_tool_source(
     }
 
 
-def _serialize_web_chunk(chunk: Any) -> dict[str, object]:
-    metadata = dict(getattr(chunk, "metadata", {}) or {})
-    return {
-        "id": getattr(chunk, "id", ""),
-        "url": metadata.get("url", getattr(chunk, "document_id", "")),
-        "title": metadata.get("title", ""),
-        "snippet": metadata.get("snippet", ""),
-        "excerpt": metadata.get("excerpt", ""),
-        "content": getattr(chunk, "text", ""),
-    }
+def _available_tool_catalog(
+    *,
+    allow_web_search: bool,
+    allow_mcp: bool,
+    mcp_tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    catalog: list[dict[str, Any]] = []
+    if allow_web_search:
+        catalog.extend(
+            [
+                {
+                    "name": "web_search",
+                    "description": "Search the public web for external information.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "top_k": {"type": "integer"},
+                        },
+                        "required": ["query"],
+                    },
+                    "kind": "web",
+                },
+                {
+                    "name": "url_fetch",
+                    "description": "Fetch the body text for one explicit URL.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"url": {"type": "string"}},
+                        "required": ["url"],
+                    },
+                    "kind": "web",
+                },
+            ]
+        )
+    if allow_mcp:
+        for tool in mcp_tools:
+            catalog.append(
+                {
+                    "name": str(tool.get("name") or ""),
+                    "description": str(tool.get("description") or "Call one MCP tool."),
+                    "input_schema": dict(tool.get("input_schema", {}) or {"type": "object", "properties": {}}),
+                    "kind": "mcp",
+                }
+            )
+    return catalog
+
+
+def _fallback_recommendations(
+    *,
+    catalog: list[dict[str, Any]],
+    limit: int,
+) -> tuple[list[dict[str, Any]], str]:
+    selected = catalog[:limit]
+    termination_reason = "more_available" if len(catalog) > len(selected) else "completed"
+    return selected, termination_reason
+
+
+def _recommendation_reason_map(args: dict[str, Any]) -> dict[str, str]:
+    reason_map: dict[str, str] = {}
+    for item in list(args.get("reasons", []) or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        why_selected = str(item.get("why_selected") or "").strip()
+        if name and why_selected:
+            reason_map[name] = why_selected
+    return reason_map
 
 
 async def run_tool_specialist(
@@ -125,332 +171,158 @@ async def run_tool_specialist(
     task: AgentTask,
     cancel_token: CancellationToken | None = None,
 ) -> AgentResult:
-    """Execute one tool specialist task."""
+    """Select a small set of external tools for the supervisor."""
 
-    def _cancelled_result(message: str) -> AgentResult:
+    if cancel_token is not None and cancel_token.is_cancelled():
         return AgentResult(
             task_id=task.task_id,
             agent_name=task.agent_name,
             status="cancelled",
-            summary=message,
+            summary="Tool search was cancelled.",
             artifacts=[],
             confidence=0.0,
             metadata={
-                "web_sources": [],
+                "recommended_tools": [],
                 "tool_sources": [],
+                "termination_reason": "cancelled",
                 "cancelled": True,
                 "progress_summary": build_progress_summary(
-                    done=message,
-                    next="等待新的工具任务",
-                    pending="当前工具执行未完成",
+                    done="工具筛选在开始前被取消",
+                    next="等待新的工具搜索任务",
+                    pending="尚未返回任何外部工具",
                 ),
             },
         )
 
-    if cancel_token is not None and cancel_token.is_cancelled():
-        return _cancelled_result("ToolAgent speculative run cancelled before execution.")
+    metadata = dict(task.metadata or {})
+    already_exposed = {str(item).strip() for item in list(metadata.get("already_exposed_tools", []) or []) if str(item).strip()}
+    allow_web_search = bool(metadata.get("allow_web_search", True))
+    allow_mcp = bool(metadata.get("allow_mcp", False))
+    max_tools = _coerce_positive_int(task.constraints.get("max_tools"), 4)
 
-    cache_store = _graph_runtime().cache_store
-    if cache_store is not None:
-        cached = cache_store.load_cached_web_search(task.query)
-        if cached is not None:
-            return AgentResult(
-                task_id=str(cached.get("task_id") or task.task_id),
-                agent_name=str(cached.get("agent_name") or task.agent_name),
-                status=str(cached.get("status") or "completed"),
-                summary=str(cached.get("summary") or ""),
-                artifacts=list(cached.get("artifacts", [])),
-                confidence=float(cached.get("confidence", 0.0) or 0.0),
-                metadata=dict(cached.get("metadata", {}) or {}),
-            )
-
-    web_provider = _graph_runtime().web_search_provider
     mcp_provider = _graph_runtime().mcp_tool_provider
-    mcp_tools = await mcp_provider.list_tools() if mcp_provider is not None else []
-
-    selected_name = "web_search"
-    selected_args: dict[str, Any] = {
-        "query": task.query,
-        "top_k": _coerce_positive_int(
-            task.constraints.get("top_k"), _graph_settings().web_search_result_limit
-        ),
-    }
-    if mcp_tools:
-        if len(mcp_tools) == 1 and web_provider is None:
-            selected_name = str(mcp_tools[0].get("name") or "")
-            selected_args = {}
-        else:
-            selection_model = _graph_runtime().chat_model.bind_tools(_tool_agent_choice_schema(mcp_tools))
-            system_prompt, user_prompt = build_tool_agent_selection_messages(
-                task_query=task.query,
-                reason=task.reason,
-            )
-            selection_response = await selection_model.ainvoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_prompt),
-                ]
-            )
-            selection_calls = _extract_tool_calls(selection_response)
-            if selection_calls:
-                selected_name = str(selection_calls[0].get("name") or selected_name)
-                selected_args = _coerce_tool_call_args(selection_calls[0])
-
-    if selected_name in {"web_search", "url_fetch"}:
-        result = await _run_web_flow(
-            task=task,
-            selected_name=selected_name,
-            selected_args=selected_args,
-            web_provider=web_provider,
-            cancel_token=cancel_token,
+    mcp_tools = await mcp_provider.list_tools() if (allow_mcp and mcp_provider is not None) else []
+    catalog = [
+        item
+        for item in _available_tool_catalog(
+            allow_web_search=allow_web_search,
+            allow_mcp=allow_mcp,
+            mcp_tools=mcp_tools,
         )
-    elif mcp_provider is not None:
-        if cancel_token is not None and cancel_token.is_cancelled():
-            return _cancelled_result("ToolAgent speculative run cancelled before MCP call.")
-        call_result = await mcp_provider.call_tool(selected_name, selected_args)
-        text = str(call_result.get("text") or "")
-        result = AgentResult(
-            task_id=task.task_id,
-            agent_name=task.agent_name,
-            status="failed" if bool(call_result.get("is_error")) else "completed",
-            summary=f"ToolAgent called MCP tool '{selected_name}'.",
-            artifacts=[
-                AgentArtifact(
-                    artifact_id=f"artifact_mcp_{uuid4().hex[:8]}",
-                    artifact_type="mcp_tool_result",
-                    content=text,
-                    metadata={
-                        "tool_name": selected_name,
-                        "structured_content": call_result.get("structured_content"),
-                        "content": call_result.get("content", []),
-                    },
-                ).to_dict()
-            ],
-            confidence=0.6 if not bool(call_result.get("is_error")) else 0.1,
-            metadata={
-                "web_sources": [],
-                "tool_sources": [
-                    _serialize_tool_source(
-                        kind="mcp",
-                        title=selected_name,
-                        summary=text[:800],
-                        tool_name=selected_name,
-                    )
-                ],
-                "mcp_tool_name": selected_name,
-                "structured_content": call_result.get("structured_content"),
-                "progress_summary": build_progress_summary(
-                    done=f"已调用 MCP 工具 {selected_name}",
-                    next="可继续根据工具结果综合回答",
-                    pending="尚未结合本地检索或工作区上下文",
-                ),
-            },
-        )
-    else:
-        result = AgentResult(
-            task_id=task.task_id,
-            agent_name=task.agent_name,
-            status="skipped",
-            summary="ToolAgent had no available tool provider.",
-            artifacts=[],
-            confidence=0.0,
-            metadata={
-                "web_sources": [],
-                "tool_sources": [],
-                "progress_summary": build_progress_summary(
-                    done="已判断当前没有可用工具提供方",
-                    next="可改用本地检索或配置外部工具",
-                    pending="外部工具信息尚未获取",
-                ),
-            },
-        )
-
-    if cache_store is not None and selected_name in {"web_search", "url_fetch"}:
-        cache_store.save_cached_web_search(
-            task.query,
-            result.to_dict(),
-            ttl_seconds=_graph_settings().redis_web_cache_ttl,
-        )
-    return result
-
-
-async def _run_web_flow(
-    *,
-    task: AgentTask,
-    selected_name: str,
-    selected_args: dict[str, Any],
-    web_provider: Any,
-    cancel_token: CancellationToken | None,
-) -> AgentResult:
-    if cancel_token is not None and cancel_token.is_cancelled():
-        return AgentResult(
-            task_id=task.task_id,
-            agent_name=task.agent_name,
-            status="cancelled",
-            summary="ToolAgent speculative run cancelled before web execution.",
-            artifacts=[],
-            confidence=0.0,
-            metadata={
-                "web_sources": [],
-                "tool_sources": [],
-                "cancelled": True,
-                "progress_summary": build_progress_summary(
-                    done="工具执行在真正访问 Web 前被取消",
-                    next="等待新的工具任务",
-                    pending="当前 Web 信息尚未获取",
-                ),
-            },
-        )
-
-    if web_provider is None:
-        return AgentResult(
-            task_id=task.task_id,
-            agent_name=task.agent_name,
-            status="skipped",
-            summary="ToolAgent could not run because no external tool provider is available.",
-            artifacts=[],
-            confidence=0.0,
-            metadata={
-                "web_sources": [],
-                "tool_sources": [],
-                "progress_summary": build_progress_summary(
-                    done="已判断当前没有可用外部工具提供方",
-                    next="可配置 Web/MCP 提供方后重试",
-                    pending="外部信息尚未获取",
-                ),
-            },
-        )
-
-    if selected_name == "url_fetch":
-        url = str(selected_args.get("url") or "")
-        if not url:
-            return AgentResult(
-                task_id=task.task_id,
-                agent_name=task.agent_name,
-                status="skipped",
-                summary="ToolAgent could not fetch a URL because no URL was provided.",
-                artifacts=[],
-                confidence=0.0,
-                metadata={
-                    "web_sources": [],
-                    "tool_sources": [],
-                    "progress_summary": build_progress_summary(
-                        done="已校验 URL 抓取参数",
-                        next="提供明确 URL 后可继续抓取",
-                        pending="目标页面内容尚未获取",
-                    ),
-                },
-            )
-        fetched = await asyncio.to_thread(web_provider.fetch, url)
-        page = _serialize_web_chunk(fetched)
-        return AgentResult(
-            task_id=task.task_id,
-            agent_name=task.agent_name,
-            status="completed",
-            summary="ToolAgent fetched one web page.",
-            artifacts=[
-                AgentArtifact(
-                    artifact_id=f"artifact_web_page_{uuid4().hex[:8]}",
-                    artifact_type="web_page_result",
-                    content=str(getattr(fetched, "text", "") or ""),
-                    metadata={"page": page},
-                ).to_dict()
-            ],
-            confidence=0.55,
-            metadata={
-                "web_sources": [page],
-                "tool_sources": [
-                    _serialize_tool_source(
-                        kind="web",
-                        title=str(page.get("title") or page.get("url") or "Fetched page"),
-                        url=str(page.get("url") or ""),
-                        summary=str(page.get("excerpt") or ""),
-                        tool_name="url_fetch",
-                    )
-                ],
-                "progress_summary": build_progress_summary(
-                    done="已抓取一个网页并提取正文",
-                    next="可继续综合网页内容回答用户问题",
-                    pending="尚未验证更多外部来源",
-                ),
-            },
-        )
-
-    results = await asyncio.to_thread(
-        web_provider.search,
-        str(selected_args.get("query") or task.query),
-        _coerce_positive_int(selected_args.get("top_k"), _graph_settings().web_search_result_limit),
-    )
-    if cancel_token is not None and cancel_token.is_cancelled():
-        return AgentResult(
-            task_id=task.task_id,
-            agent_name=task.agent_name,
-            status="cancelled",
-            summary="ToolAgent speculative run cancelled after web search.",
-            artifacts=[],
-            confidence=0.0,
-            metadata={
-                "web_sources": [],
-                "tool_sources": [],
-                "cancelled": True,
-                "progress_summary": build_progress_summary(
-                    done="已完成搜索但在后续处理前被取消",
-                    next="可重新触发工具搜索",
-                    pending="搜索结果尚未完整整合",
-                ),
-            },
-        )
-
-    web_sources = [_serialize_web_chunk(result) for result in results]
-    artifacts: list[dict[str, Any]] = [
-        AgentArtifact(
-            artifact_id=f"artifact_web_search_{uuid4().hex[:8]}",
-            artifact_type="web_search_result",
-            content=f"Found {len(results)} web results for: {task.query}",
-            metadata={"web_sources": web_sources},
-        ).to_dict()
+        if str(item.get("name") or "") not in already_exposed
     ]
-    if results and bool(task.constraints.get("fetch_top_url", True)):
-        top_url = str(web_sources[0].get("url", "") or "")
-        if top_url:
-            fetched = await asyncio.to_thread(web_provider.fetch, top_url)
-            artifacts.append(
-                AgentArtifact(
-                    artifact_id=f"artifact_web_page_{uuid4().hex[:8]}",
-                    artifact_type="web_page_result",
-                    content=str(getattr(fetched, "text", "") or ""),
-                    metadata={"page": _serialize_web_chunk(fetched)},
-                ).to_dict()
-            )
-            web_sources = [dict(_serialize_web_chunk(fetched))]
 
+    if not catalog:
+        return AgentResult(
+            task_id=task.task_id,
+            agent_name=task.agent_name,
+            status="skipped",
+            summary="No additional tools available to expose.",
+            artifacts=[],
+            confidence=0.0,
+            metadata={
+                "recommended_tools": [],
+                "tool_sources": [],
+                "termination_reason": "no_match",
+                "progress_summary": build_progress_summary(
+                    done="已检查可用 Web/MCP 工具",
+                    next="可改用本地检索、记忆或文件工具",
+                    pending="当前没有新的外部工具可暴露",
+                ),
+            },
+        )
+
+    selected_tools, termination_reason = _fallback_recommendations(catalog=catalog, limit=max_tools)
+    system_prompt, user_prompt = build_tool_agent_selection_messages(
+        task_query=task.query,
+        reason=task.reason,
+        available_tools=catalog,
+        max_tools=max_tools,
+        already_exposed_tools=sorted(already_exposed),
+    )
+
+    try:
+        selection_model = _graph_runtime().worker_model.bind_tools(_tool_search_selection_schema())
+        selection_response = await selection_model.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+        )
+        selection_calls = _extract_tool_calls(selection_response)
+        if selection_calls:
+            args = _coerce_tool_call_args(selection_calls[0])
+            reason_map = _recommendation_reason_map(args)
+            selected_names = [
+                str(item).strip()
+                for item in list(args.get("selected_names", []) or [])
+                if str(item).strip()
+            ]
+            if selected_names:
+                selected_lookup = {str(item.get("name") or ""): item for item in catalog}
+                filtered = [
+                    {
+                        **selected_lookup[name],
+                        "why_selected": reason_map.get(name, "Matched the stated tool requirements."),
+                    }
+                    for name in selected_names
+                    if name in selected_lookup
+                ][:max_tools]
+                if filtered:
+                    selected_tools = filtered
+            parsed_termination = str(args.get("termination_reason") or "").strip()
+            if parsed_termination:
+                termination_reason = parsed_termination
+    except Exception:  # noqa: BLE001
+        pass
+
+    for tool in selected_tools:
+        if not str(tool.get("why_selected") or "").strip():
+            tool["why_selected"] = "Matched the stated tool requirements."
+
+    summary = (
+        f"Found {len(selected_tools)} additional tool(s) matching your query."
+        if selected_tools
+        else "No matching tools were found."
+    )
+    artifact_payload = {
+        "recommended_tools": selected_tools,
+        "termination_reason": termination_reason,
+    }
     return AgentResult(
         task_id=task.task_id,
         agent_name=task.agent_name,
-        status="completed",
-        summary=(
-            "ToolAgent found external web evidence."
-            if web_sources
-            else "ToolAgent web search returned weak evidence."
-        ),
-        artifacts=artifacts,
-        confidence=0.65 if web_sources else 0.15,
+        status="completed" if selected_tools else "skipped",
+        summary=summary,
+        artifacts=[
+            AgentArtifact(
+                artifact_id=f"artifact_tool_search_{uuid4().hex[:8]}",
+                artifact_type="tool_search_result",
+                content=json.dumps(artifact_payload, ensure_ascii=False, indent=2),
+                metadata=artifact_payload,
+            ).to_dict()
+        ],
+        confidence=0.7 if selected_tools else 0.0,
         metadata={
-            "web_sources": web_sources,
+            "recommended_tools": selected_tools,
             "tool_sources": [
                 _serialize_tool_source(
-                    kind="web",
-                    title=str(item.get("title") or item.get("url") or "Web source"),
-                    url=str(item.get("url") or ""),
-                    summary=str(item.get("snippet") or item.get("excerpt") or ""),
-                    tool_name="web_search",
+                    kind=str(item.get("kind") or "external"),
+                    title=str(item.get("name") or ""),
+                    summary=str(item.get("why_selected") or ""),
+                    tool_name=str(item.get("name") or ""),
                 )
-                for item in web_sources
+                for item in selected_tools
             ],
+            "termination_reason": termination_reason,
             "progress_summary": build_progress_summary(
-                done="已完成外部 Web 搜索并提取候选来源",
-                next="可继续基于来源整合最终回答",
-                pending="尚未确认这些来源是否足以支撑最终结论",
+                done="已完成工具筛选并返回候选工具",
+                next="supervisor 可直接调用这些工具，或再次 tool_search 获取更多候选",
+                pending=(
+                    "由于数量限制，仍有未披露工具"
+                    if termination_reason == "more_available"
+                    else "暂无额外工具待披露"
+                ),
             ),
         },
     )
@@ -481,5 +353,3 @@ def build_tool_agent_graph():
     builder.add_edge(START, "execute")
     builder.add_edge("execute", END)
     return builder.compile(name="tool_agent")
-
-

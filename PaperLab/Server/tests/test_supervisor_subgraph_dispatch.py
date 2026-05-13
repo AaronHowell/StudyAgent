@@ -60,7 +60,6 @@ def _result(task_id: str, agent_name: str) -> AgentResult:
     ("direct_name", "graph_name", "task_key", "result_key", "agent_name"),
     [
         ("run_retrieve_specialist", "retrieve_agent_graph", "retrieve_task", "retrieve_result", "retrieval_agent"),
-        ("run_tool_specialist", "tool_agent_graph", "tool_task", "tool_result", "tool_agent"),
     ],
 )
 def test_parallel_specialists_dispatches_each_worker_through_subgraph(

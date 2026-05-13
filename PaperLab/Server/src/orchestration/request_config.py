@@ -19,6 +19,12 @@ class AgentRequestConfig:
     memory_limit: int = 5
     thread_id: str | None = DEFAULT_THREAD_ID
     max_iterations: int = 2
+    workspace_root: str | None = None
+    allow_web_search: bool = False
+    allow_file_read: bool = False
+    allow_file_write: bool = False
+    allow_mcp: bool = False
+    allow_shell: bool = False
 
 
 def coerce_positive_int(value: Any, default: int) -> int:
@@ -34,6 +40,19 @@ def coerce_non_empty_str(value: Any, default: str) -> str:
     return parsed or default
 
 
+def coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def resolve_agent_request_config(config: dict[str, Any] | None) -> AgentRequestConfig:
     configurable = (config or {}).get("configurable", {})
     default_project_id = AgentSettings.from_env().default_project_id or DEFAULT_PROJECT_ID
@@ -46,6 +65,12 @@ def resolve_agent_request_config(config: dict[str, Any] | None) -> AgentRequestC
         memory_limit=coerce_positive_int(configurable.get("memory_limit"), 5),
         thread_id=coerce_non_empty_str(configurable.get("thread_id"), DEFAULT_THREAD_ID),
         max_iterations=coerce_positive_int(configurable.get("max_iterations"), 2),
+        workspace_root=str(configurable.get("workspace_root") or "").strip() or None,
+        allow_web_search=coerce_bool(configurable.get("allow_web_search"), False),
+        allow_file_read=coerce_bool(configurable.get("allow_file_read"), False),
+        allow_file_write=coerce_bool(configurable.get("allow_file_write"), False),
+        allow_mcp=coerce_bool(configurable.get("allow_mcp"), False),
+        allow_shell=coerce_bool(configurable.get("allow_shell"), False),
     )
 
 

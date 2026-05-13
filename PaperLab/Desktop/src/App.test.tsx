@@ -153,6 +153,7 @@ describe("App", () => {
 
     expect(screen.getByRole("tab", { name: /论文工作台/ })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: /AI 对话/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /AI SOLO/ })).toBeInTheDocument();
   });
 
   test("可以切换到 AI 对话工作台", async () => {
@@ -163,6 +164,19 @@ describe("App", () => {
 
     expect(screen.getByRole("tab", { name: /AI 对话/ })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("mock-chat-panel")).toBeInTheDocument();
+  });
+
+  test("可以切换到 AI SOLO 工作台", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: /AI SOLO/ }));
+
+    expect(screen.getByRole("tab", { name: /AI SOLO/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "AI SOLO" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/可继续已有对话并执行 Tool Agent、文件操作与 MCP CodingAgent 任务/),
+    ).toBeInTheDocument();
   });
 
   test("启动时恢复上次项目并自动刷新论文列表", async () => {

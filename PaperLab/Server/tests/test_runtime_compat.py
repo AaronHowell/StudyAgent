@@ -14,7 +14,7 @@ from integrations.vectorstore.qdrant_store import QdrantChunkVectorStore, Qdrant
 from langchain_core.messages import AIMessage, HumanMessage
 from memory.service import MemoryService
 from orchestration.request_config import resolve_agent_request_config
-from runtime.dependencies import _build_memory_chat_model, _build_qdrant_client
+from runtime.dependencies import _build_memory_chat_model, _build_primary_chat_model, _build_qdrant_client, _patch_reasoning_content_support
 from runtime import settings as runtime_settings
 from runtime.settings import AgentSettings
 
@@ -331,6 +331,51 @@ class RuntimeCompatTest(unittest.TestCase):
         self.assertEqual(chat_openai.call_args.kwargs["base_url"], "http://small.local/v1")
         self.assertEqual(chat_openai.call_args.kwargs["api_key"], "small-key")
         self.assertEqual(chat_openai.call_args.kwargs["model"], "small-model")
+        self.assertEqual(chat_openai.call_args.kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_primary_chat_model_disables_thinking_by_default(self) -> None:
+        settings = AgentSettings(
+            llm_base_url="https://main.example/v1",
+            llm_api_key="main-key",
+            llm_model="main-model",
+        )
+
+        with patch("runtime.dependencies.ChatOpenAI") as chat_openai:
+            _build_primary_chat_model(settings)
+
+        self.assertEqual(chat_openai.call_args.kwargs["base_url"], "https://main.example/v1")
+        self.assertEqual(chat_openai.call_args.kwargs["api_key"], "main-key")
+        self.assertEqual(chat_openai.call_args.kwargs["model"], "main-model")
+        self.assertEqual(chat_openai.call_args.kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_primary_chat_model_can_enable_thinking_via_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PAPERLAB_LLM_THINKING_ENABLED": "true",
+                "PAPERLAB_MEMORY_LLM_THINKING_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            settings = AgentSettings.from_env()
+
+        self.assertTrue(settings.llm_thinking_enabled)
+        self.assertTrue(settings.memory_llm_thinking_enabled)
+
+    def test_reasoning_content_patch_round_trips_reasoning_content(self) -> None:
+        from langchain_core.messages import AIMessage
+        import langchain_openai.chat_models.base as openai_base
+
+        _patch_reasoning_content_support()
+        message = AIMessage(
+            content="final answer",
+            additional_kwargs={"reasoning_content": "hidden chain"},
+            response_metadata={"reasoning_content": "hidden chain"},
+        )
+
+        serialized = openai_base._convert_message_to_dict(message)
+
+        self.assertEqual(serialized["reasoning_content"], "hidden chain")
 
     def test_qdrant_client_ignores_system_proxy_by_default(self) -> None:
         settings = AgentSettings()
@@ -364,6 +409,33 @@ class RuntimeCompatTest(unittest.TestCase):
             _build_qdrant_client(settings, urlparse(settings.qdrant_url))
 
         self.assertEqual(qdrant_client.call_args.kwargs["trust_env"], False)
+
+    def test_remote_qdrant_client_preserves_explicit_http_url_when_api_key_is_present(self) -> None:
+        settings = AgentSettings(
+            qdrant_url="http://10.201.0.86:6333",
+            qdrant_api_key="secret-key",
+            qdrant_trust_env=False,
+        )
+
+        with patch("runtime.dependencies.QdrantClient") as qdrant_client:
+            _build_qdrant_client(settings, urlparse(settings.qdrant_url))
+
+        self.assertEqual(qdrant_client.call_args.kwargs["url"], "http://10.201.0.86:6333")
+        self.assertEqual(qdrant_client.call_args.kwargs["api_key"], "secret-key")
+
+    def test_vector_store_preserves_explicit_http_url_when_api_key_is_present(self) -> None:
+        config = QdrantConnectionConfig(
+            url="http://10.201.0.86:6333",
+            host="10.201.0.86",
+            port=6333,
+            api_key="secret-key",
+        )
+
+        with patch("integrations.vectorstore.qdrant_store.QdrantClient") as qdrant_client:
+            QdrantChunkVectorStore(config)
+
+        self.assertEqual(qdrant_client.call_args.kwargs["url"], "http://10.201.0.86:6333")
+        self.assertEqual(qdrant_client.call_args.kwargs["api_key"], "secret-key")
 
     def test_api_and_agent_settings_share_base_environment_parsing(self) -> None:
         env = {

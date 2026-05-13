@@ -312,6 +312,7 @@ class ChatRunRequest(BaseModel):
     )
     command: ChatCommandInput | None = None
     tools_enabled: bool = False
+    tool_settings: dict[str, object] | None = None
 
 
 class ChatGuidanceRequest(BaseModel):
@@ -359,6 +360,7 @@ class ChatTraceItemResponse(BaseModel):
     text: str = ""
     status: str = "completed"
     created_at: str = ""
+    metadata: dict[str, object] | None = None
 
 
 class ChatTurnResponse(BaseModel):

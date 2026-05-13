@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
+
+logger = logging.getLogger("paperlab.mcp")
 
 try:
     from mcp import ClientSession, StdioServerParameters
@@ -87,8 +90,12 @@ class McpToolProvider:
     async def list_tools(self) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for config in self.configs:
-            async with self._session(config) as session:
-                response = await session.list_tools()
+            try:
+                async with self._session(config) as session:
+                    response = await session.list_tools()
+            except Exception as exc:
+                logger.warning("MCP server '%s' failed to connect: %s", config.server_id, exc)
+                continue
             tools = getattr(response, "tools", []) or []
             for tool in tools:
                 tool_name = str(getattr(tool, "name", "") or "")
@@ -104,8 +111,19 @@ class McpToolProvider:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         server_id, tool_name = self._split_tool_name(name)
         config = self._find_config(server_id)
-        async with self._session(config) as session:
-            result = await session.call_tool(tool_name, arguments=arguments)
+        try:
+            async with self._session(config) as session:
+                result = await session.call_tool(tool_name, arguments=arguments)
+        except Exception as exc:
+            logger.warning("MCP tool '%s' on server '%s' failed: %s", tool_name, server_id, exc)
+            return {
+                "tool_name": name,
+                "server_id": server_id,
+                "text": f"工具调用失败: {exc}",
+                "structured_content": None,
+                "is_error": True,
+                "content": [{"type": "text", "text": f"工具调用失败: {exc}"}],
+            }
         content_blocks = getattr(result, "content", []) or []
         texts: list[str] = []
         normalized_content: list[dict[str, Any]] = []

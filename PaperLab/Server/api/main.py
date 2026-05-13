@@ -154,6 +154,33 @@ def select_project_folder(payload: SelectProjectFolderRequest) -> SelectProjectF
     return SelectProjectFolderResponse(path=selected_path)
 
 
+@app.get("/mcp/servers")
+def list_mcp_servers() -> dict[str, object]:
+    """Return the configured MCP servers from environment settings."""
+
+    agent_settings = AgentSettings.from_env()
+    servers: list[dict[str, object]] = []
+
+    if not agent_settings.mcp_enabled:
+        return {"enabled": False, "servers": servers}
+
+    if agent_settings.mcp_servers:
+        for item in agent_settings.mcp_servers:
+            servers.append({
+                "server_id": str(item.get("server_id") or item.get("id") or "default"),
+                "transport": str(item.get("transport") or "stdio"),
+                "command": str(item.get("command") or ""),
+            })
+    else:
+        servers.append({
+            "server_id": "default",
+            "transport": agent_settings.mcp_transport,
+            "command": agent_settings.mcp_server_command,
+        })
+
+    return {"enabled": True, "servers": servers}
+
+
 if __name__ == "__main__":
     uvicorn.run(
         "api.main:app",

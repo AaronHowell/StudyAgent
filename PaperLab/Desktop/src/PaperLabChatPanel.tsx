@@ -9,6 +9,17 @@ import {
 } from "./usePaperLabStream";
 import type { ChatSessionSummary } from "./types";
 import { MarkdownRenderer } from "./components/chat/MarkdownRenderer";
+import {
+  Wrench,
+  Plug,
+  Globe,
+  FileText,
+  FileEdit,
+  Terminal,
+  Cpu,
+  FolderRoot,
+  ShieldAlert,
+} from "lucide-react";
 
 type LoopInterruptValue = {
   type?: string;
@@ -33,6 +44,7 @@ type ChatThreadSummary = {
 
 type PaperLabChatPanelProps = {
   projectId: string;
+  rootPath?: string;
   title: string;
   description?: string;
   placeholder: string;
@@ -46,6 +58,7 @@ const apiBase =
 
 export function PaperLabChatPanel({
   projectId,
+  rootPath = "",
   title,
   description = "",
   placeholder,
@@ -55,7 +68,31 @@ export function PaperLabChatPanel({
 }: PaperLabChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [showSummaries, setShowSummaries] = useState(false);
-  const [toolsEnabled, setToolsEnabled] = useState(false);
+  const [toolSettings, setToolSettings] = useState<{
+    allow_web_search: boolean;
+    allow_file_read: boolean;
+    allow_file_write: boolean;
+    allow_mcp: boolean;
+    allow_shell: boolean;
+    workspace_root: string;
+  }>(() => {
+    const saved = localStorage.getItem("paperlab_tool_settings");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      allow_web_search: false,
+      allow_file_read: false,
+      allow_file_write: false,
+      allow_mcp: false,
+      allow_shell: false,
+      workspace_root: localStorage.getItem("paperlab_workspace_root") || "",
+    };
+  });
   const [serverThreads, setServerThreads] = useState<ChatThreadSummary[]>([]);
   const submitLockRef = useRef(false);
   const guidanceQueueLockRef = useRef(false);
@@ -64,6 +101,91 @@ export function PaperLabChatPanel({
   });
 
   const groupedThreads = useMemo(() => groupThreadsByProject(serverThreads), [serverThreads]);
+
+  useEffect(() => {
+    localStorage.setItem("paperlab_tool_settings", JSON.stringify(toolSettings));
+  }, [toolSettings]);
+
+  const toolDefinitions = useMemo(
+    () => [
+      { key: "allow_web_search" as const, name: "网络搜索", desc: "搜索外部信息", icon: Globe },
+      { key: "allow_file_read" as const, name: "文件读取", desc: "读取工作区文件", icon: FileText },
+      { key: "allow_file_write" as const, name: "文件写入", desc: "创建和修改文件", icon: FileEdit },
+      { key: "allow_mcp" as const, name: "MCP 工具", desc: "连接外部 CodingAgent", icon: Plug },
+      { key: "allow_shell" as const, name: "Shell 执行", desc: "执行系统命令", icon: Terminal },
+    ],
+    [],
+  );
+
+  const [mcpServers, setMcpServers] = useState<{ id: string; transport: string; connected: boolean }[]>([]);
+
+  useEffect(() => {
+    if (!toolSettings.allow_mcp) {
+      setMcpServers([]);
+      return;
+    }
+    let cancelled = false;
+    fetch(`${apiBase}/mcp/servers`)
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data: { enabled: boolean; servers: { server_id: string; transport: string; command: string }[] }) => {
+        if (cancelled) return;
+        setMcpServers(
+          data.servers.map((s) => ({
+            id: s.server_id,
+            transport: s.transport,
+            connected: false,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setMcpServers([]);
+      });
+    return () => { cancelled = true; };
+  }, [toolSettings.allow_mcp]);
+
+  // Set default workspace root to {rootPath's parent}/workspace
+  useEffect(() => {
+    if (!rootPath || toolSettings.workspace_root) return;
+    const parent = rootPath.replace(/[\\/][^\\/]+$/, "");
+    const defaultWs = parent ? `${parent}/workspace` : "";
+    if (defaultWs) {
+      setToolSettings((current) => ({ ...current, workspace_root: defaultWs }));
+    }
+  }, [rootPath]);
+
+  const [choosingWorkspace, setChoosingWorkspace] = useState(false);
+
+  async function chooseWorkspaceFolder() {
+    setChoosingWorkspace(true);
+    try {
+      const response = await fetch(`${apiBase}/desktop/project-folder/select`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_path: toolSettings.workspace_root || undefined }),
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as { path: string };
+      if (payload.path) {
+        setToolSettings((current) => ({ ...current, workspace_root: payload.path }));
+      }
+    } catch {
+      // silently ignore
+    } finally {
+      setChoosingWorkspace(false);
+    }
+  }
+
+  const enabledToolCount = useMemo(
+    () =>
+      [
+        toolSettings.allow_web_search,
+        toolSettings.allow_file_read,
+        toolSettings.allow_file_write,
+        toolSettings.allow_mcp,
+        toolSettings.allow_shell,
+      ].filter(Boolean).length,
+    [toolSettings],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -160,7 +282,8 @@ export function PaperLabChatPanel({
         },
         {
           projectId,
-          toolsEnabled,
+          toolsEnabled: Object.values(toolSettings).some((value) => Boolean(value)),
+          toolSettings,
           optimisticTurns: [
             {
               id: `local-user-${Date.now()}`,
@@ -181,9 +304,9 @@ export function PaperLabChatPanel({
   }
 
   async function openThread(thread: ChatThreadSummary) {
+    if (thread.id === stream.threadId) return;
     try {
       await stream.restoreSession({ projectId: thread.projectId, threadId: thread.id });
-      touchThread(thread.id);
     } catch {
       stream.resetThread(thread.id);
     }
@@ -229,7 +352,7 @@ export function PaperLabChatPanel({
   }
 
   return (
-    <section className={`chat-board ${showThreadSidebar ? "with-sidebar" : "single-pane"} ${compact ? "compact" : "regular"}`}>
+    <section className={`paperlab-solo-panel chat-board ${showThreadSidebar ? "with-sidebar" : "single-pane"} ${compact ? "compact" : "regular"}`}>
       {showThreadSidebar ? (
         <aside className="chat-sidebar">
           <div className="chat-sidebar-header">
@@ -271,6 +394,7 @@ export function PaperLabChatPanel({
       <section className="chat-main">
         <header className="chat-main-header">
           <div>
+            <p className="section-kicker">AI SOLO</p>
             <h2>{title}</h2>
             {description ? <p className="chat-description">{description}</p> : null}
             {contextLabel ? <div className="chat-context-banner">{contextLabel}</div> : null}
@@ -321,14 +445,16 @@ export function PaperLabChatPanel({
             onApprove={() =>
               void stream.submit(null, {
                 projectId,
-                toolsEnabled,
+                toolsEnabled: Object.values(toolSettings).some((value) => Boolean(value)),
+                toolSettings,
                 command: { resume: { action: "approve" } },
               })
             }
             onReject={() =>
               void stream.submit(null, {
                 projectId,
-                toolsEnabled,
+                toolsEnabled: Object.values(toolSettings).some((value) => Boolean(value)),
+                toolSettings,
                 command: { resume: { action: "reject" } },
               })
             }
@@ -348,14 +474,6 @@ export function PaperLabChatPanel({
             <button className="button subtle small-button" onClick={() => stream.stop()} disabled={!stream.isLoading}>
               停止
             </button>
-            <label className="chat-tools-toggle">
-              <input
-                type="checkbox"
-                checked={toolsEnabled}
-                onChange={(event) => setToolsEnabled(event.target.checked)}
-              />
-              工具
-            </label>
             <button
               className="button primary send-button"
               onClick={() => void handleSendMessage()}
@@ -366,6 +484,22 @@ export function PaperLabChatPanel({
           </div>
         </div>
       </section>
+
+      {/* Right panel: tool controls */}
+      <SoloToolPanel
+        toolDefinitions={toolDefinitions}
+        toolSettings={toolSettings}
+        onToggleTool={(key) =>
+          setToolSettings((current) => ({ ...current, [key]: !current[key] }))
+        }
+        onWorkspaceRootChange={(value) =>
+          setToolSettings((current) => ({ ...current, workspace_root: value }))
+        }
+        onChooseWorkspaceFolder={() => void chooseWorkspaceFolder()}
+        choosingWorkspace={choosingWorkspace}
+        mcpServers={mcpServers}
+        enabledToolCount={enabledToolCount}
+      />
     </section>
   );
 }
@@ -484,22 +618,27 @@ function ChatTurnBubble({
 
       {toolSources.length > 0 ? (
         <div className="citation-row">
-          {toolSources.map((source, index) =>
-            source.url ? (
+          {toolSources.map((source, index) => {
+            const isMcp = source.kind === "mcp";
+            const chipClass = `chip citation-chip ${isMcp ? "citation-chip-mcp" : ""}`;
+            const label = source.title || source.tool_name || "工具来源";
+            const inner = isMcp ? <><Plug size={10} /> {label}</> : label;
+            return source.url ? (
               <a
-                className="chip citation-chip"
+                className={chipClass}
                 key={`${source.url}-${index}`}
                 href={source.url}
                 target="_blank"
                 rel="noreferrer"
               >
-                {source.title || source.tool_name || "工具来源"}
+                {inner}
               </a>
             ) : (
-              <span className="chip citation-chip" key={`${source.title}-${index}`}>
-                {source.title || source.tool_name || "工具来源"}
+              <span className={chipClass} key={`${source.title ?? label}-${index}`}>
+                {inner}
               </span>
-            ),
+            );
+          },
           )}
         </div>
       ) : null}
@@ -526,6 +665,130 @@ function traceItemLabel(item: ChatTraceItem): string {
     return item.title || "工具结果";
   }
   return item.title || "思考";
+}
+
+function SoloToolPanel({
+  toolDefinitions,
+  toolSettings,
+  onToggleTool,
+  onWorkspaceRootChange,
+  onChooseWorkspaceFolder,
+  choosingWorkspace,
+  mcpServers,
+  enabledToolCount,
+}: {
+  toolDefinitions: { key: keyof typeof toolSettings; name: string; desc: string; icon: typeof Globe }[];
+  toolSettings: {
+    allow_web_search: boolean;
+    allow_file_read: boolean;
+    allow_file_write: boolean;
+    allow_mcp: boolean;
+    allow_shell: boolean;
+    workspace_root: string;
+  };
+  onToggleTool: (key: keyof typeof toolSettings) => void;
+  onWorkspaceRootChange: (value: string) => void;
+  onChooseWorkspaceFolder: () => void;
+  choosingWorkspace: boolean;
+  mcpServers: { id: string; transport: string; connected: boolean }[];
+  enabledToolCount: number;
+}) {
+  return (
+    <aside className="chat-right-panel">
+      <div className="chat-right-panel-header">
+        <span className="chat-right-panel-title">
+          <Wrench size={14} />
+          工具控制
+        </span>
+        <span className="chip">{enabledToolCount} 已启用</span>
+      </div>
+
+      <section className="tool-panel-section">
+        <div className="tool-panel-section-head">
+          <FolderRoot size={13} />
+          工作目录
+        </div>
+        <p className="tool-panel-section-copy">所有文件工具与命令都以此目录为边界</p>
+        <div className="workspace-root-row">
+          <input
+            className="input"
+            aria-label="工作目录"
+            placeholder="例如 C:/workspace/paperlab"
+            value={toolSettings.workspace_root}
+            onChange={(event) => onWorkspaceRootChange(event.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onChooseWorkspaceFolder}
+            disabled={choosingWorkspace}
+            title="选择文件夹"
+          >
+            <FolderRoot size={14} />
+            {choosingWorkspace ? "..." : "浏览"}
+          </button>
+        </div>
+      </section>
+
+      <section className="tool-panel-section">
+        <div className="tool-panel-section-head">
+          <ShieldAlert size={13} />
+          权限开关
+        </div>
+        <p className="tool-panel-section-copy">
+          Web 与 MCP 通过 Tool Agent 参与规划。Shell 属于高风险能力，启用后仍需逐次确认。
+        </p>
+        <div className="tool-cards">
+        {toolDefinitions.map(({ key, name, desc, icon: Icon }) => (
+          <div key={key} className={`tool-card ${toolSettings[key] ? "active" : ""}`}>
+            <div className="tool-card-icon">
+              <Icon size={14} />
+            </div>
+            <div className="tool-card-info">
+              <div className="tool-card-name">{name}</div>
+              <div className="tool-card-desc">{desc}</div>
+            </div>
+            <button
+              type="button"
+              className={`tool-card-toggle ${toolSettings[key] ? "on" : ""}`}
+              onClick={() => onToggleTool(key)}
+              aria-label={`切换${name}`}
+            >
+              <div className="toggle-thumb" />
+            </button>
+          </div>
+        ))}
+        </div>
+      </section>
+
+      <section className="tool-panel-section">
+        <div className="mcp-section-title">
+          <Cpu size={13} />
+          MCP 服务器
+        </div>
+
+        {mcpServers.length === 0 ? (
+          <div className="solo-empty-hint">
+            启用 MCP 工具后
+            <br />
+            在这里显示连接状态与可用代理
+          </div>
+        ) : (
+          <div className="mcp-server-list">
+            {mcpServers.map((server) => (
+              <div className="server-card" key={server.id}>
+                <div className={`server-card-status ${server.connected ? "connected" : ""}`} />
+                <div className="server-card-info">
+                  <div className="server-card-name">{server.id}</div>
+                  <div className="server-card-transport">{server.transport}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </aside>
+  );
 }
 
 function groupThreadsByProject(threads: ChatThreadSummary[]) {

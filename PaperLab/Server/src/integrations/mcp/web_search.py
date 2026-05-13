@@ -17,6 +17,7 @@ from domain import Chunk, ChunkType
 @dataclass(slots=True)
 class DDGSWebSearchConfig:
     timeout_seconds: int = 20
+    safesearch: str = "on"
 
 
 class DDGSWebSearchProvider:
@@ -39,7 +40,7 @@ class DDGSWebSearchProvider:
             self.client = DDGS(timeout=self.config.timeout_seconds)
 
     def search(self, query: str, limit: int = 5) -> list[Chunk]:
-        rows = list(self.client.text(query, max_results=limit) or [])
+        rows = list(self.client.text(query, max_results=limit, safesearch=self.config.safesearch) or [])
         chunks: list[Chunk] = []
         for index, row in enumerate(rows):
             url = str(row.get("href", "") or row.get("url", ""))
@@ -64,8 +65,9 @@ class DDGSWebSearchProvider:
         return chunks
 
     def fetch(self, url: str) -> Chunk:
-        rows = list(self.client.extract([url]) or [])
-        if not rows:
+        try:
+            result = self.client.extract(url)
+        except Exception:
             return Chunk(
                 id=_stable_web_chunk_id(url),
                 project_id="web",
@@ -76,9 +78,7 @@ class DDGSWebSearchProvider:
                 metadata={"title": "", "url": url, "excerpt": ""},
             )
 
-        row = rows[0]
-        body = str(row.get("body", "") or row.get("content", "") or "")
-        title = str(row.get("title", "") or "")
+        body = str(result.get("content", "") or "")
         excerpt = body[:800]
         return Chunk(
             id=_stable_web_chunk_id(url),
@@ -88,7 +88,7 @@ class DDGSWebSearchProvider:
             chunk_type=ChunkType.WEB,
             text=body,
             metadata={
-                "title": title,
+                "title": "",
                 "url": url,
                 "excerpt": excerpt,
             },

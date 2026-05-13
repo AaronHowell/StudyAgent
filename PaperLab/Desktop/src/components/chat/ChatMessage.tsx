@@ -1,4 +1,4 @@
-import { Bot, User } from "lucide-react";
+import { Bot, User, Plug } from "lucide-react";
 import type { ChatTurn } from "../../usePaperLabStream";
 import { AgentTrace } from "./AgentTrace";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -68,17 +68,21 @@ export function ChatMessage({
 
         {turn.tool_sources && turn.tool_sources.length > 0 ? (
           <div className="citation-row">
-            {turn.tool_sources.map((src, i) =>
-              src.url ? (
-                <a className="citation-chip" key={`${src.url}-${i}`} href={src.url} target="_blank" rel="noreferrer">
-                  {src.title || src.tool_name || "工具来源"}
+            {turn.tool_sources.map((src, i) => {
+              const isMcp = src.kind === "mcp";
+              const chipClass = `citation-chip ${isMcp ? "citation-chip-mcp" : ""}`;
+              const label = src.title || src.tool_name || "工具来源";
+              const inner = isMcp ? <><Plug size={10} /> {label}</> : label;
+              return src.url ? (
+                <a className={chipClass} key={`${src.url}-${i}`} href={src.url} target="_blank" rel="noreferrer">
+                  {inner}
                 </a>
               ) : (
-                <span className="citation-chip" key={`${src.title}-${i}`}>
-                  {src.title || src.tool_name || "工具来源"}
+                <span className={chipClass} key={`${src.title ?? label}-${i}`}>
+                  {inner}
                 </span>
-              ),
-            )}
+              );
+            })}
           </div>
         ) : null}
       </div>

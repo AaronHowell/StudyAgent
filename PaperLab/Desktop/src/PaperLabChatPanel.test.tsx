@@ -261,7 +261,10 @@ describe("PaperLabChatPanel", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "新对话" }));
-    await user.click(screen.getByLabelText("工具"));
+    await user.click(screen.getByRole("button", { name: "切换文件读取" }));
+    await user.click(screen.getByRole("button", { name: "切换文件写入" }));
+    await user.click(screen.getByRole("button", { name: "切换网络搜索" }));
+    await user.type(screen.getByLabelText("工作目录"), "C:/workspace/demo");
     await user.type(screen.getByPlaceholderText("请输入问题"), "解释这篇论文的核心贡献");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
@@ -269,7 +272,14 @@ describe("PaperLabChatPanel", () => {
       .mocked(globalThis.fetch)
       .mock.calls.find(([input]) => String(input).includes("/chat/stream"));
     expect(JSON.parse(String((streamCall?.[1] as RequestInit | undefined)?.body))).toMatchObject({
-      tools_enabled: true,
+      tool_settings: {
+        allow_file_read: true,
+        allow_file_write: true,
+        allow_web_search: true,
+        allow_mcp: false,
+        allow_shell: false,
+        workspace_root: "C:/workspace/demo",
+      },
     });
 
     expect(screen.getByText("解释这篇论文的核心贡献")).toBeInTheDocument();
@@ -342,5 +352,33 @@ describe("PaperLabChatPanel", () => {
     );
     expect(screen.getByText("请优先看实验")).toBeInTheDocument();
     streamControllers[0]?.close();
+  });
+
+  test("高权限 shell 需要显式授权后才会进入请求配置", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <PaperLabChatPanel
+        projectId="vision-lab"
+        title="论文助手"
+        description="测试用聊天面板"
+        placeholder="请输入问题"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "切换文件读取" }));
+    await user.click(screen.getByRole("button", { name: "切换Shell 执行" }));
+    await user.type(screen.getByPlaceholderText("请输入问题"), "列出当前目录");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const streamCall = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.find(([input]) => String(input).includes("/chat/stream"));
+    expect(JSON.parse(String((streamCall?.[1] as RequestInit | undefined)?.body))).toMatchObject({
+      tool_settings: {
+        allow_file_read: true,
+        allow_shell: true,
+      },
+    });
   });
 });

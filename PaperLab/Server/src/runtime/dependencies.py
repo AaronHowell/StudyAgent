@@ -101,6 +101,7 @@ from integrations import (
     RedisCacheConfig,
     RedisCacheStore,
 )
+from integrations.vectorstore.qdrant_store import normalize_qdrant_connection_kwargs
 
 from contracts import AgentResult
 from contracts import AgentTask
@@ -141,6 +142,7 @@ class AgentRuntime:
 
     retrieve_evidence_use_case: RetrieveEvidenceUseCase
     chat_model: ChatOpenAI
+    worker_chat_model: ChatOpenAI | None = None
     memory_store: MemoryBackend | None = None
     web_search_provider: DDGSWebSearchProvider | None = None
     mcp_tool_provider: McpToolProvider | None = None
@@ -152,6 +154,12 @@ class AgentRuntime:
         """Expose the configured long-term memory backend through a stable name."""
 
         return self.memory_store
+
+    @property
+    def worker_model(self) -> ChatOpenAI:
+        """Model for sub-agents (tool, retriever). Falls back to chat_model."""
+
+        return self.worker_chat_model or self.chat_model
 
     def start_speculative_run(
         self,
@@ -192,13 +200,6 @@ class AgentRuntime:
 
         task_handle.add_done_callback(_capture_result)
         return record
-
-    def list_speculative_runs(self, turn_id: str) -> list[SpeculativeRunRecord]:
-        return [
-            record
-            for record in self.speculative_runs.values()
-            if record.turn_id == turn_id
-        ]
 
     def cancel_speculative_run(self, run_id: str) -> None:
         record = self.speculative_runs.get(run_id)
@@ -252,11 +253,64 @@ def _build_mem0_llm_config(settings: AgentSettings) -> dict[str, object]:
 
 
 def _build_memory_chat_model(settings: AgentSettings) -> ChatOpenAI:
-    return ChatOpenAI(
+    return _build_chat_openai_model(
         base_url=settings.memory_llm_base_url,
         api_key=settings.memory_llm_api_key,
         model=settings.memory_llm_model,
         streaming=False,
+        thinking_enabled=settings.memory_llm_thinking_enabled,
+    )
+
+
+def _build_worker_chat_model(settings: AgentSettings) -> ChatOpenAI:
+    return _build_chat_openai_model(
+        base_url=settings.worker_llm_base_url,
+        api_key=settings.worker_llm_api_key,
+        model=settings.worker_llm_model,
+        streaming=True,
+        thinking_enabled=settings.worker_llm_thinking_enabled,
+    )
+
+
+def _chat_openai_extra_body(*, thinking_enabled: bool) -> dict[str, object] | None:
+    if thinking_enabled:
+        return None
+    return {"thinking": {"type": "disabled"}}
+
+
+def _build_chat_openai_model(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    streaming: bool,
+    thinking_enabled: bool,
+) -> ChatOpenAI:
+    kwargs: dict[str, object] = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "streaming": streaming,
+    }
+    extra_body = _chat_openai_extra_body(thinking_enabled=thinking_enabled)
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    return ChatOpenAI(**kwargs)
+
+
+def _build_primary_chat_model(settings: AgentSettings) -> ChatOpenAI:
+    return ChatOpenAI(
+        **{
+            "base_url": settings.llm_base_url,
+            "api_key": settings.llm_api_key,
+            "model": settings.llm_model,
+            "streaming": True,
+            **(
+                {"extra_body": _chat_openai_extra_body(thinking_enabled=settings.llm_thinking_enabled)}
+                if _chat_openai_extra_body(thinking_enabled=settings.llm_thinking_enabled) is not None
+                else {}
+            ),
+        }
     )
 
 
@@ -274,6 +328,38 @@ def _build_mem0_embedder_config(settings: AgentSettings) -> dict[str, object]:
     elif settings.memory_embedder_provider == "ollama":
         config["ollama_base_url"] = base_url
     return config
+
+
+def _patch_reasoning_content_support() -> None:
+    """Monkey-patch langchain_openai to round-trip reasoning_content when present."""
+
+    try:
+        from langchain_openai.chat_models.base import _convert_message_to_dict as _original
+    except ImportError:
+        return
+
+    if getattr(_original, "_reasoning_patched", False):
+        return
+
+    def _convert_message_to_dict_with_reasoning(message, api="chat/completions"):
+        message_dict = _original(message, api)
+        additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+        response_metadata = dict(getattr(message, "response_metadata", {}) or {})
+        reasoning_content = (
+            getattr(message, "reasoning_content", None)
+            or additional_kwargs.get("reasoning_content")
+            or response_metadata.get("reasoning_content")
+        )
+        if reasoning_content:
+            message_dict["reasoning_content"] = reasoning_content
+        else:
+            message_dict.pop("reasoning_content", None)
+        return message_dict
+
+    _convert_message_to_dict_with_reasoning._reasoning_patched = True  # type: ignore[attr-defined]
+
+    import langchain_openai.chat_models.base as _mod
+    _mod._convert_message_to_dict = _convert_message_to_dict_with_reasoning
 
 
 def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
@@ -347,12 +433,9 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
         asset_recall_k=resolved.retrieval_asset_recall_k,
         chunk_rerank_neighbor_window=resolved.retrieval_chunk_rerank_neighbor_window,
     )
-    chat_model = ChatOpenAI(
-        base_url=resolved.llm_base_url,
-        api_key=resolved.llm_api_key,
-        model=resolved.llm_model,
-        streaming=True,
-    )
+    chat_model = _build_primary_chat_model(resolved)
+    worker_chat_model = _build_worker_chat_model(resolved)
+    _patch_reasoning_content_support()
     memory_store = None
     if resolved.memory_enabled and resolved.memory_backend == "markdown":
         memory_chat_model = _build_memory_chat_model(resolved)
@@ -445,6 +528,7 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
     return AgentRuntime(
         retrieve_evidence_use_case=retrieve_evidence_use_case,
         chat_model=chat_model,
+        worker_chat_model=worker_chat_model,
         memory_store=memory_store,
         web_search_provider=web_search_provider,
         mcp_tool_provider=mcp_tool_provider,
@@ -455,17 +539,14 @@ def create_runtime(settings: AgentSettings | None = None) -> AgentRuntime:
 def _build_qdrant_client(settings: AgentSettings, parsed_qdrant_url) -> QdrantClient:
     """Build a Qdrant client with the same transport policy used by retrieval."""
 
-    if settings.qdrant_url:
-        return QdrantClient(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key or None,
-            timeout=settings.qdrant_timeout_seconds,
-            trust_env=settings.qdrant_trust_env,
-        )
-    return QdrantClient(
+    connection_kwargs = normalize_qdrant_connection_kwargs(
+        url=settings.qdrant_url,
         host=parsed_qdrant_url.hostname or "127.0.0.1",
         port=parsed_qdrant_url.port or 6333,
-        api_key=settings.qdrant_api_key or None,
+        api_key=settings.qdrant_api_key,
+    )
+    return QdrantClient(
         timeout=settings.qdrant_timeout_seconds,
         trust_env=settings.qdrant_trust_env,
+        **connection_kwargs,
     )

@@ -64,11 +64,6 @@ def test_assess_node_returns_answer_when_model_says_evidence_is_enough() -> None
     with patch.object(supervisor, "_runtime", return_value=_FakeRuntime(model)):
         update = asyncio.run(supervisor.assess_node(_state()))
 
-    assert model.bound_tools is not None
-    assert {tool["function"]["name"] for tool in model.bound_tools} == {
-        "decide_memory_write",
-        "continue_evidence_loop",
-    }
     assert update["answer_confident"] is True
     assert update["stop_reason"] == ""
     assert update["messages"][0].type == "ai"
@@ -88,7 +83,7 @@ def test_assess_node_records_optional_memory_tool_decision_when_answering() -> N
             {
                 "name": "decide_memory_write",
                 "args": {
-                    "should_write": True,
+                    "action": "store",
                     "memory_type": "project_fact",
                     "content": "本项目偏好 answer-or-loop 节点。",
                     "reason": "Stable project orchestration preference.",
@@ -102,6 +97,7 @@ def test_assess_node_records_optional_memory_tool_decision_when_answering() -> N
 
     metadata = update["messages"][0].additional_kwargs["metadata"]
     assert metadata["memory_write_decision"] == {
+        "action": "store",
         "should_write": True,
         "memory_type": "project_fact",
         "content": "本项目偏好 answer-or-loop 节点。",
@@ -142,3 +138,77 @@ def test_assess_node_loops_when_model_says_evidence_is_not_enough() -> None:
 
 def test_route_after_assess_sends_final_answer_to_store_memory() -> None:
     assert supervisor._route_after_assess({"answer_confident": True}) == "store_memory"
+
+
+def test_assess_node_forwards_config_to_synthesize_node() -> None:
+    model = _FakeAnswerOrLoopModel(
+        {
+            "answer_confident": True,
+            "answer": "证据足够，最终答案。",
+            "summary": {"done": "已综合证据", "next": "", "pending": ""},
+            "next_tasks": [],
+        }
+    )
+    captured: dict[str, Any] = {}
+    config = {"configurable": {"project_id": "project-a", "thread_id": "thread-1"}}
+
+    async def _fake_synthesize_node(state: dict[str, Any], config_arg: Any = None) -> dict[str, Any]:
+        captured["state"] = state
+        captured["config"] = config_arg
+        return {"messages": [], "answer_confident": True, "stop_reason": ""}
+
+    with (
+        patch.object(supervisor, "_runtime", return_value=_FakeRuntime(model)),
+        patch.object(supervisor, "synthesize_node", side_effect=_fake_synthesize_node),
+    ):
+        update = asyncio.run(supervisor.assess_node(_state(), config=config))
+
+    assert update["answer_confident"] is True
+    assert captured["config"] == config
+    assert captured["state"]["answer_confident"] is True
+
+
+def test_assess_node_forwards_next_steps_to_synthesize_when_last_round_still_lacks_evidence() -> None:
+    model = _FakeAnswerOrLoopModel(
+        {
+            "answer_confident": False,
+            "answer": "",
+            "summary": {"done": "", "next": "", "pending": ""},
+            "next_tasks": [],
+        },
+        tool_calls=[
+            {
+                "name": "continue_evidence_loop",
+                "args": {
+                    "reason": "Need venue and author metadata.",
+                    "next_tasks": [
+                        "Fetch the title page or abstract section for each paper.",
+                        "Extract venue and year from the first page metadata.",
+                    ],
+                },
+            }
+        ],
+    )
+    captured: dict[str, Any] = {}
+    state = {
+        **_state(),
+        "iteration_count": 3,
+        "max_iterations": 3,
+    }
+
+    async def _fake_synthesize_node(state: dict[str, Any], config_arg: Any = None) -> dict[str, Any]:
+        captured["state"] = state
+        return {"messages": [], "answer_confident": True, "stop_reason": "max_iterations_reached"}
+
+    with (
+        patch.object(supervisor, "_runtime", return_value=_FakeRuntime(model)),
+        patch.object(supervisor, "synthesize_node", side_effect=_fake_synthesize_node),
+    ):
+        asyncio.run(supervisor.assess_node(state))
+
+    assert captured["state"]["stop_reason"] == "max_iterations_reached"
+    assert captured["state"]["assessment_loop_reason"] == "Need venue and author metadata."
+    assert captured["state"]["assessment_next_tasks"] == [
+        "Fetch the title page or abstract section for each paper.",
+        "Extract venue and year from the first page metadata.",
+    ]

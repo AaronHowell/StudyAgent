@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, Search, Code, FileText, Globe, Wrench, Brain } from "lucide-react";
+import { ChevronDown, Search, Code, FileText, Globe, Wrench, Brain, Plug, Package } from "lucide-react";
 import type { ChatTraceItem } from "../../usePaperLabStream";
 
 const TRACE_ICONS: Record<string, typeof Brain> = {
@@ -8,6 +8,7 @@ const TRACE_ICONS: Record<string, typeof Brain> = {
   search: Search,
   code: Code,
   web: Globe,
+  mcp: Plug,
 };
 
 const LOW_SIGNAL_TRACE_TITLES = new Set([
@@ -41,6 +42,8 @@ function traceItemCategory(item: ChatTraceItem): string {
   const title = item.title.trim();
   if (title === "长期记忆检索" || title === "长期记忆写入") return "memory";
   if (title === "retrieval_agent" || title === "检索思路" || title.includes("检索")) return "retrieval";
+  if (item.kind === "tool_call" && title.includes("::")) return "mcp";
+  if (item.kind === "tool_result" && title.includes("::")) return "mcp";
   return "default";
 }
 
@@ -82,9 +85,50 @@ export function AgentTrace({
   );
 }
 
+type RecommendedTool = {
+  name: string;
+  description?: string;
+  why_selected?: string;
+  kind?: string;
+};
+
+function ToolSearchResultCard({ item }: { item: ChatTraceItem }) {
+  const tools = (item.metadata?.recommended_tools as RecommendedTool[]) ?? [];
+  return (
+    <div className="trace-item tool_result trace-item-tool-search">
+      <div className="trace-item-head">
+        <Package size={14} />
+        <span>{item.title || "工具发现"}</span>
+      </div>
+      {tools.length > 0 ? (
+        <div className="tool-search-list">
+          {tools.map((tool) => (
+            <div key={tool.name} className="tool-search-card">
+              <div className="tool-search-card-header">
+                <Wrench size={12} />
+                <span className="tool-search-name">{tool.name}</span>
+                {tool.kind ? <span className="tool-search-kind">{tool.kind}</span> : null}
+              </div>
+              {tool.description ? <div className="tool-search-desc">{tool.description}</div> : null}
+              {tool.why_selected ? <div className="tool-search-reason">{tool.why_selected}</div> : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="trace-item-body">{item.text}</div>
+      )}
+    </div>
+  );
+}
+
 function TraceItemRow({ item }: { item: ChatTraceItem }) {
   const Icon = TRACE_ICONS[item.kind] || Brain;
   const category = traceItemCategory(item);
+  const isToolSearch = item.title === "工具发现" || item.metadata?.recommended_tools;
+
+  if (isToolSearch) {
+    return <ToolSearchResultCard item={item} />;
+  }
 
   return (
     <div className={`trace-item ${item.kind} ${category !== "default" ? `trace-item-${category}` : ""}`}>

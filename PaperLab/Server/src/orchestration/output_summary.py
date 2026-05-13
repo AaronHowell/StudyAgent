@@ -38,9 +38,8 @@ def parse_structured_assistant_output(raw_output: Any) -> tuple[str, dict[str, s
     if not stripped:
         return "", build_progress_summary(done="", next="", pending="")
 
-    try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
+    payload = _load_json_object(stripped)
+    if payload is None:
         return (
             stripped,
             build_progress_summary(
@@ -62,8 +61,6 @@ def parse_structured_assistant_output(raw_output: Any) -> tuple[str, dict[str, s
 
     answer = str(payload.get("answer") or payload.get("content") or "").strip()
     summary = normalize_progress_summary(payload.get("summary"))
-    if not answer:
-        answer = stripped
     if not any(summary.values()):
         summary = build_progress_summary(
             done="已生成当前回复",
@@ -71,3 +68,18 @@ def parse_structured_assistant_output(raw_output: Any) -> tuple[str, dict[str, s
             pending="结构化输出中缺少步骤摘要",
         )
     return answer, summary
+
+
+def _load_json_object(text: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
